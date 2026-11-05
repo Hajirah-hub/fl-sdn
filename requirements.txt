@@ -1,0 +1,15 @@
+# Python 3.13 (Kaggle 3.13.18, local Windows 3.13.17). Direct dependencies, exact pins.
+# CPU-only torch wheels:
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu
+# flwr 1.43.0's [simulation] extra pulls ray==2.55.1 on Linux (Kaggle) but NOT on Windows + Python 3.13
+# (no wheel exists there) -> Flower's Ray-based simulation is unavailable on the local Windows venv.
+flwr[simulation]==1.43.0
+numpy==2.5.4
+pandas==3.1.1
+pyarrow==26.0.1
+scikit-learn==1.9.1
+scipy==1.18.1
+scikit-posthocs==0.17.1
+PyYAML==6.0.3
+pytest==9.2.0

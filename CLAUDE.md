@@ -1,0 +1,189 @@
+# CLAUDE.md — Federated aggregation study on multi-controller SDN
+
+Single-person implementation of Section III of `docs/paper.pdf` (methodology only).
+Primary dataset: InSDN. Other datasets (CICDDoS2019, CICIDS2017, UNSW-NB15) follow the same
+pipeline later; each dataset is an independent federation — never merge datasets.
+
+## Environment
+
+- Python **3.13** (Kaggle runs 3.13.18; local venv uses 3.13.17 because 3.13.18 has no Windows
+  installer — same `cp313` ABI, same wheels). PyTorch **CPU** build. Flower in simulation mode.
+- Local: `.venv/` → `.venv\Scripts\activate` → `pip install -r requirements.txt`.
+- Exact versions: `requirements.txt` (direct pins) and `requirements-lock.txt` (full freeze).
+  Never upgrade a pin casually — Flower's simulation API changes between releases.
+- **Ray / Flower simulation is Kaggle-only for now.** `flwr==1.43.0[simulation]` requires
+  `ray==2.55.1` except on Windows + Python 3.13, where no wheel exists, so the local venv has no Ray.
+  Keep strategy and client logic testable without Ray (call them in-process in tests).
+  After the first Kaggle install, save `pip freeze` as `requirements-lock-kaggle.txt`.
+- Paths come from env vars, never hard-coded:
+  - `FEDSDN_DATA` (default `./data`; Kaggle: `/kaggle/input/<dataset-slug>`)
+  - `FEDSDN_RESULTS` (default `./results`; Kaggle: `/kaggle/working/results`)
+- `data/` and `results/` are git-ignored. Tests use tiny synthetic data only.
+
+## Layout
+
+```
+src/fedsdn/data/      preprocess.py, partition.py, scaling.py
+src/fedsdn/strategies/ custom FedNova + SCAFFOLD; wrappers for built-in Flower strategies
+src/fedsdn/           models.py, client.py, metrics.py, checkpoint.py, run.py
+configs/              base.yaml, tuning/, sweeps/
+scripts/              build_dataset, make_partitions, expand_sweep, aggregate_results
+kaggle/               driver notebook (install pins, set env vars, run config list)
+tests/
+```
+
+## Raw data: InSDN
+
+`data/raw/insdn/{Normal_data,OVS,metasploitable-2}.csv`, 84 columns, CICFlowMeter format.
+
+- Column names and `Label` values have stray whitespace (`"DDoS "`) → strip both.
+- `Timestamp` is **day-first** (`31/12/2019 ...`), mixed resolution: most rows `D/M/YYYY H:MM`
+  (minute resolution), some `D/M/YYYY H:MM:SS`. Parse explicitly; record resolution per row.
+- No NaN/inf at time of setup (still check in code).
+- **Row-count check vs README** (record expected, observed and difference in `meta.json`):
+
+  | File | README | Observed |
+  |---|---|---|
+  | Normal_data.csv | 68,424 | 68,424 |
+  | OVS.csv | 136,743 | 138,722 |
+  | metasploitable-2.csv | 138,772 | 136,743 |
+
+  The README values for OVS and metasploitable-2 appear swapped, with a further 50-row difference.
+
+## Preprocessing rules (Section III-C + project decisions) — apply in this order
+
+1. Load all CSVs; add `row_id` = stable global index in (file name, file row) order; record raw counts.
+2. Strip whitespace; parse `Timestamp` → `ts` (UTC) and `ts_resolution_s` (1 or 60).
+3. Drop rows with missing or infinite values (count recorded).
+4. **Identifiers are removed from the feature set**: `Flow ID`, `Src IP`, `Dst IP`, `Src Port`,
+   `Timestamp`. **`Dst Port` is kept** as a numeric feature. `ts`, `src_ip`, `dst_ip` are retained
+   as non-feature metadata only (for the split and the grouped-split fallback), never fed to the model.
+5. **Deduplicate on feature columns + label** (after step 4):
+   - First, every group whose features are identical but whose labels differ is dropped **entirely**
+     (all rows of that group).
+   - Then, among exact feature+label duplicates, keep the **earliest** flow (`ts`, ties → `row_id`).
+   - Record in `meta.json`: rows dropped as conflicting, rows dropped as duplicates, and **class
+     counts after dedup** (also print them).
+6. Label map: `y_bin` (Normal=0, every attack=1) and `family` for the multi-class task.
+7. **Rare classes**: families with < 500 flows after dedup are merged into one `Rare` class; if
+   `Rare` still has < 500 flows, those flows get `y_multi = -1` (excluded from the multi-class task)
+   but stay in the binary task as attack. At setup, before dedup, Web-Attack (192), BOTNET (164) and
+   U2R (17) already qualify; after dedup **DDoS drops to ~1,527** (re-check; apply the rule to
+   whatever falls below 500).
+8. **Class cap 20,000**: classes larger than the cap are thinned uniformly in time order (sort by
+   `ts`, `row_id`; keep evenly spaced positions). Record pre- and post-cap counts.
+9. **Chronological split, per class**: sort by (`ts`, `row_id`); boundary `b` = time of the flow at
+   the 80% position. Each flow covers the interval `[ts, ts + ts_resolution_s)`. Flows whose interval
+   overlaps `[b − 60 s, b + 60 s]` are discarded (`split = gap`); earlier flows → `train`, later →
+   `test`. Report per-class gap losses (count and %); **flag any class losing > 10%** in `meta.json`
+   and in the console. The fallback (grouped split by src–dst address pair) applies only where start
+   times are unusable; record which method each class used.
+10. Drop feature columns that are constant over the training pool (12 at setup, e.g.
+    `Fwd PSH Flags`, `Init Fwd Win Byts`); one-hot encode `Protocol`.
+11. **No scaling in preprocessing.** Standardization happens inside each federation from per-client
+    counts, sums and sums of squares, aggregated at the server (`data/scaling.py`).
+12. The test set is never seen by any client. Each client holds out 10% of its shard for validation.
+    Class imbalance → **class-weighted cross-entropy**, never oversampling.
+
+## Data file format
+
+`data/processed/<ds>/flows.parquet` — one row per flow surviving steps 1–5 (gap and excluded rows
+are kept, marked, so counts are auditable):
+
+| column | type | notes |
+|---|---|---|
+| `row_id` | int64 | stable join key for partitions |
+| `ts` | timestamp[UTC] | metadata only |
+| `ts_resolution_s` | int8 | 1 or 60 |
+| `src_ip`, `dst_ip` | string | metadata only |
+| `family` | string | original attack family (`Normal` for benign) |
+| `y_multi` | int16 | class index, `-1` = excluded from multi-class |
+| `y_bin` | int8 | 0 benign, 1 attack |
+| `capped_out` | bool | removed by the 20k cap |
+| `split` | string | `train` / `test` / `gap` |
+| `f_*` | float32 | features, unscaled, constant columns dropped, protocol one-hot |
+
+`data/processed/<ds>/meta.json`: source file hashes, README vs observed row counts, NaN/inf drops,
+conflict drops, duplicate drops, class counts after dedup / after rare rule / after cap / per split,
+per-class gap losses + >10% flags, split method per class, feature list, dropped columns + reason,
+class index map, rare-class decision.
+
+## Partition file format
+
+`data/partitions/<ds>/<scheme>_<param>_K<K>_s<seed>.parquet`, e.g. `P1_a0.5_K8_s3`, `P3_m1_K8_s0`,
+`P4_a0.5b0.5_K8_s0`. Training-pool rows only.
+
+| column | type |
+|---|---|
+| `row_id` | int64 |
+| `client_id` | int16 (0..K−1) |
+| `is_val` | bool (10% local validation) |
+
+Sidecar `.json`: scheme + parameters, K, seed, `flows_sha256` (hash of `flows.parquet`; runs refuse
+to start on mismatch), attempts used (≤100), whether rows were reassigned to meet `n_min = 100`,
+per-client class counts, mean pairwise JSD of label distributions, CV of shard sizes, (P3) family →
+client assignment. Partitions are built on `family` labels and reused unchanged for the binary task.
+
+## Run config (YAML)
+
+```yaml
+run_id: null            # null → first 12 hex chars of sha1 of the canonical config (sorted keys, minus run_id)
+dataset: insdn
+task: multi             # multi | binary
+partition: {scheme: P1, alpha: 0.5, beta: null, m: null}
+K: 8
+E: 1
+R: 100
+batch_size: 256
+model: mlp              # mlp | cnn1d
+seed: 0
+strategy:
+  name: fedavg          # fedavg|fedprox|scaffold|fednova|fedadam|krum|median|trimmed_mean
+  lr: 0.05              # client SGD rate
+  mu: null              # FedProx
+  server_lr: null       # FedAdam
+  eps: null             # FedAdam
+  f_hat: null           # robust rules; null → floor(K/4) (Krum uses 0 at K=4)
+attack: {f: 0, type: null}   # type: label_flip | sign_flip | targeted
+checkpoint_every: 1
+```
+
+## Results schema
+
+`$FEDSDN_RESULTS/<run_id>/`:
+
+- `config.yaml` — resolved config as run.
+- `rounds.csv` — one row per round: `run_id, round, macro_f1, accuracy, precision, recall, fpr,
+  rare_recall, worst_client_f1, client_f1_std, n_present_classes_min, bytes_up, bytes_down,
+  client_cpu_s, server_s, wall_s`
+- `per_class.csv` — `run_id, round, class, recall, support`
+- `summary.csv` — one row: config fields flattened + final metrics, `t95`, `t95_censored`,
+  `auc_f1_rounds`
+- `ckpt.pt` — checkpoint (below). `status` — `RUNNING` | `DONE`.
+
+## Training rules
+
+- Model: MLP d→128→64→C, ReLU, dropout 0.2 (logits + `CrossEntropyLoss`); 1D-CNN secondary.
+- **Plain mini-batch SGD, momentum = 0, no weight decay**, so local steps τ_k = E·⌈n_k/B⌉ are exact
+  (FedNova needs this). Batch 256.
+- **Class-weighted cross-entropy** loss; no oversampling.
+- FedProx term is added in client code; SCAFFOLD client control variates persist outside the
+  ephemeral Flower client, keyed by `client_id`.
+- Unit tests: FedNova == FedAvg when all τ_k equal; SCAFFOLD == FedAvg with control variates frozen
+  at zero.
+
+## Resumability (every run, keyed by run_id)
+
+- `ckpt.pt` after every `checkpoint_every` rounds: completed round, global weights, server optimizer
+  state (FedAdam m, v), SCAFFOLD server + per-client control variates, malicious-client set, RNG
+  states (python, numpy, torch).
+- On start: if `status == DONE` → skip. If a checkpoint exists → load it, truncate `rounds.csv` /
+  `per_class.csv` rows with `round > ckpt.round`, continue. Otherwise start fresh.
+- Writes are atomic (write temp file, then `os.replace`).
+- Test: a run interrupted and resumed must give results identical to an uninterrupted run.
+- Kaggle sessions are time-limited: drivers take a list of configs and rely on this to continue.
+
+## Open questions (decide before implementing)
+
+- Class weights: computed from global training counts (via server aggregation) or per-client local
+  counts? Not specified in the paper.

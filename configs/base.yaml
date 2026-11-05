@@ -1,0 +1,19 @@
+run_id: null            # null → first 12 hex chars of sha1 of the canonical config (sorted keys, minus run_id)
+dataset: insdn
+task: multi             # multi | binary
+partition: {scheme: P1, alpha: 0.5, beta: null, m: null}
+K: 8
+E: 1
+R: 100
+batch_size: 256
+model: mlp              # mlp | cnn1d
+seed: 0
+strategy:
+  name: fedavg          # fedavg|fedprox|scaffold|fednova|fedadam|krum|median|trimmed_mean
+  lr: 0.05              # client SGD rate
+  mu: null              # FedProx
+  server_lr: null       # FedAdam
+  eps: null             # FedAdam
+  f_hat: null           # robust rules; null → floor(K/4) (Krum uses 0 at K=4)
+attack: {f: 0, type: null}   # type: label_flip | sign_flip | targeted
+checkpoint_every: 1

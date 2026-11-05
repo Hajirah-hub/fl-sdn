@@ -1,0 +1,24 @@
+# Data and outputs (never committed)
+/data/
+/results/
+
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Checkpoints / large binaries
+*.pt
+*.ckpt
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
