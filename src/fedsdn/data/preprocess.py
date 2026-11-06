@@ -526,7 +526,7 @@ def preprocess_frame(raw: pd.DataFrame, spec: DatasetSpec, p: Params = Params())
 # --------------------------------------------------------------------------------------------
 
 
-def _atomic_write(path: Path, write) -> None:
+def atomic_write(path: Path, write) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     os.close(fd)
@@ -544,9 +544,9 @@ def build(raw_dir: Path, out_dir: Path, spec: DatasetSpec, p: Params = Params())
     flows, meta = preprocess_frame(raw, spec, p)
     meta = {"dataset": spec.name, "step1_load": load_meta, **meta}
     out_dir = Path(out_dir)
-    _atomic_write(out_dir / "flows.parquet", lambda t: flows.to_parquet(t, index=False))
+    atomic_write(out_dir / "flows.parquet", lambda t: flows.to_parquet(t, index=False))
     meta["flows_sha256"] = sha256_file(out_dir / "flows.parquet")
-    _atomic_write(out_dir / "meta.json",
+    atomic_write(out_dir / "meta.json",
                   lambda t: Path(t).write_text(json.dumps(meta, indent=2), encoding="utf-8"))
     return meta
 

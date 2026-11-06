@@ -168,6 +168,23 @@ Rows with `y_multi = -1` (the excluded Rare group) are treated as **one family o
 partitioning, so the same shards serve both tasks. In the multi-class task those rows stay in the
 shard and are masked out (see Training rules).
 
+Schemes (`data/partition.py`; "dealing" = shuffle, then consecutive chunks sized by
+largest-remainder rounding of the proportions; RNG stream per (setting tag, seed)):
+- **P0** shuffle, equal shards. **P1** per family `q_c ~ Dir_K(α)`, α ∈ {0.1, 0.5, 1, 10}, family
+  dealt by `q_c`. **P2** `s ~ Dir_K(β)`, β ∈ {0.5, 1}, all rows dealt by `s`.
+- **P3** benign dealt equally over all K; attack families in a seeded order, round-robin,
+  `m_eff = max(m, ⌈F/K⌉)` distinct families per client (m ∈ {1, 2}); a family is dealt equally
+  among its holders.
+- **P4** (approved method, not specified in the paper): `q_c ~ Dir_K(0.5)` per family, one
+  `s ~ Dir_K(0.5)`; family c dealt by `q̃_c,k = q_c,k·s_k / Σ_j q_c,j·s_j`. Uniform `s` → P1,
+  uniform `q` → P2 (in expectation).
+- `n_min = 100` applies to the whole shard (validation included). After 100 failed draws, the
+  draw with the largest minimum shard is kept and random rows move from the current largest shard.
+- Validation: per client `round(0.1·n_k)` rows, allocated over families proportionally.
+- JSD: base 2, over per-client family distributions of the whole shard; CV uses population std.
+- Scaling (`data/scaling.py`): float64 count / sum / sum of squares on training rows (validation
+  excluded); population std; a feature with `var ≤ 1e-12·E[x²]` is constant → std 1.
+
 ## Run config (YAML)
 
 ```yaml
