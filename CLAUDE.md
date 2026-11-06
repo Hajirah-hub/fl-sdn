@@ -280,3 +280,7 @@ sign flip (−update) and targeted (malicious clients relabel attack rows as Nor
   (train F1 0.88) nor undertrained (100 epochs: test F1 0.52); random split gives 0.95. The gap is
   distribution shift: BFA test recall 0 (held-out address pair), Probe ≈ 0.3.
 - Old chrono results without validation logging: `results/archive_chrono_v1_noval/`.
+- Paper outputs: `scripts/paper_outputs.py` → `results/paper_tables/*.csv` (3 decimals, mean/std in
+  separate columns; Friedman + Nemenyi on random R = 100 val-selected macro-F1, blocks =
+  partition × seed) and `results/paper_figures/*.png` (300 dpi, 3.5 in single column, Okabe-Ito
+  colors fixed per strategy, no titles). Never built from `results/dry`.
