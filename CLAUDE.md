@@ -58,8 +58,10 @@ tests/
 `data/raw/insdn/{Normal_data,OVS,metasploitable-2}.csv`, 84 columns, CICFlowMeter format.
 
 - Column names and `Label` values have stray whitespace (`"DDoS "`) → strip both.
-- `Timestamp` is **day-first** (`31/12/2019 ...`), mixed resolution: most rows `D/M/YYYY H:MM`
-  (minute resolution), some `D/M/YYYY H:MM:SS`. Parse explicitly; record resolution per row.
+- `Timestamp` is **day-first**, mixed resolution, exactly two formats: most rows are 24-hour
+  `D/M/YYYY H:MM` (`5/2/2020 13:58`, minute resolution); 85,811 rows are 12-hour with AM/PM
+  `DD/MM/YYYY hh:MM:SS AM|PM` (`31/12/2019 02:25:57 PM`, second resolution). Parse explicitly
+  with only these two formats; record resolution per row. No time zone in source → read as UTC.
 - No NaN/inf at time of setup (still check in code).
 - **Row-count check vs README** (record expected, observed and difference in `meta.json`):
 
@@ -89,16 +91,32 @@ tests/
 7. **Rare classes**: families with < 500 flows after dedup are merged into one `Rare` class; if
    `Rare` still has < 500 flows, those flows get `y_multi = -1` (excluded from the multi-class task)
    but stay in the binary task as attack. At setup, before dedup, Web-Attack (192), BOTNET (164) and
-   U2R (17) already qualify; after dedup **DDoS drops to ~1,527** (re-check; apply the rule to
-   whatever falls below 500).
+   U2R (17) already qualify; after dedup **DDoS drops to 1,520** (still ≥ 500; the rule is applied
+   to whatever falls below 500). InSDN result: Rare = BOTNET 164 + Web-Attack 183 + U2R 17 = 364
+   → excluded (`y_multi = -1`).
 8. **Class cap 20,000**: classes larger than the cap are thinned uniformly in time order (sort by
    `ts`, `row_id`; keep evenly spaced positions). Record pre- and post-cap counts.
-9. **Chronological split, per class**: sort by (`ts`, `row_id`); boundary `b` = time of the flow at
-   the 80% position. Each flow covers the interval `[ts, ts + ts_resolution_s)`. Flows whose interval
-   overlaps `[b − 60 s, b + 60 s]` are discarded (`split = gap`); earlier flows → `train`, later →
-   `test`. Report per-class gap losses (count and %); **flag any class losing > 10%** in `meta.json`
-   and in the console. The fallback (grouped split by src–dst address pair) applies only where start
-   times are unusable; record which method each class used.
+9. **Split per family, between minutes** (non-capped rows; capped rows get `split = capped`):
+   Floor every `ts` to its minute. A **minute cut** splits **between** two consecutive minutes
+   (train = minutes ≤ cut), so no minute is on both sides. No flows are discarded (no gap).
+   Per family, the first rule that succeeds is used (ties → earliest cut):
+   - **(a) `minute_cut`**: cuts with test share in **[10%, 35%]** and **≥ 100 test flows**; take
+     the one whose test share is closest to **20%**.
+   - **(b) `minute_cut_relaxed`**: cuts with **≥ 100 test flows** and test share **≤ 50%**; take
+     the one whose test share is closest to the range [10%, 35%].
+   - **(c) `grouped_src_dst_pair`**: whole unordered src–dst address pairs go to test, with the
+     constraints of (a) (share in [10%, 35%], ≥ 100 test flows, closest to 20%; exact subset-sum,
+     ties → smaller test, pairs taken deterministically in name order). Record **pairs-per-flow**
+     (distinct pairs / flows); **flag > 0.5** as degenerate grouping (e.g. spoofed sources).
+   - **(d) `unsplit_all_train`**: the whole family goes to train (listed in `unsplit_families`).
+   - **Rare families** (merged into `Rare` by step 7: BOTNET, Web-Attack, U2R) are split **each
+     separately** by the same rules **without the 100-flow minimum**, except that in (b) the test
+     share must also be **≥ 10%** (so (b) can only pick a share in (35%, 50%]).
+   - Record per family: method, cut minutes or test pairs, realized test share, distinct minutes
+     in train / test / shared, pairs-per-flow + flag (grouped only).
+   - InSDN result (accepted): Normal, DoS (10.8%, only acceptable cut), Probe, U2R, Web-Attack →
+     (a); DDoS → (b) at 42.7% (its sources are spoofed: one pair per flow, so (c) would be a
+     random split); BFA → (c), pairs/flow 0.002; BOTNET → (d).
 10. Drop feature columns that are constant over the training pool (12 at setup, e.g.
     `Fwd PSH Flags`, `Init Fwd Win Byts`); one-hot encode `Protocol`.
 11. **No scaling in preprocessing.** Standardization happens inside each federation from per-client
@@ -108,8 +126,8 @@ tests/
 
 ## Data file format
 
-`data/processed/<ds>/flows.parquet` — one row per flow surviving steps 1–5 (gap and excluded rows
-are kept, marked, so counts are auditable):
+`data/processed/<ds>/flows.parquet` — one row per flow surviving steps 1–5 (capped and excluded
+rows are kept, marked, so counts are auditable):
 
 | column | type | notes |
 |---|---|---|
@@ -121,12 +139,14 @@ are kept, marked, so counts are auditable):
 | `y_multi` | int16 | class index, `-1` = excluded from multi-class |
 | `y_bin` | int8 | 0 benign, 1 attack |
 | `capped_out` | bool | removed by the 20k cap |
-| `split` | string | `train` / `test` / `gap` |
+| `split` | string | `train` / `test` / `capped` (`capped` ⇔ `capped_out`) |
 | `f_*` | float32 | features, unscaled, constant columns dropped, protocol one-hot |
 
 `data/processed/<ds>/meta.json`: source file hashes, README vs observed row counts, NaN/inf drops,
 conflict drops, duplicate drops, class counts after dedup / after rare rule / after cap / per split,
-per-class gap losses + >10% flags, split method per class, feature list, dropped columns + reason,
+per-family split (method, cut / test pairs, test share, distinct minutes train / test / shared,
+pairs-per-flow + degenerate flag for grouped families),
+unsplit families, feature list, dropped columns + reason,
 class index map, rare-class decision.
 
 ## Partition file format
