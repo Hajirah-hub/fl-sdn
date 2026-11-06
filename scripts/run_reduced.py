@@ -2,7 +2,7 @@
 
     python scripts/run_reduced.py                 # both protocols, 4 worker processes
     python scripts/run_reduced.py --dry           # 2 rounds, a few runs, results/dry/
-    python scripts/run_reduced.py --suite r100    # random protocol, R = 100, FedAvg/FedAdam -> results/r100/
+    python scripts/run_reduced.py --suite r100    # random protocol, R = 100, all strategies -> results/r100/
     tail -f results/progress.log                  # live progress
 
 Protocols: chrono (primary; centralized + 84 federated + 24 poisoning) and random (secondary;
@@ -50,9 +50,14 @@ def all_configs() -> list[RunConfig]:
 
 
 def r100_configs() -> list[RunConfig]:
-    """Follow-up: random protocol, R = 100, FedAvg + FedAdam, all four partitions, seeds 0-2."""
-    return [RunConfig(kind="fed", strategy=st, partition=p, seed=s, protocol="random", R=100)
-            for st in ("fedavg", "fedadam") for p in PARTITIONS for s in SEEDS]
+    """Random protocol at R = 100: centralized (100 epochs) + all 7 strategies x 4 partitions x
+    seeds 0-2. FedAvg/FedAdam were run first; finished runs are skipped."""
+    cfgs = [RunConfig(kind="central", seed=s, protocol="random", R=100) for s in SEEDS]
+    cfgs += [RunConfig(kind="fed", strategy=st, partition=p, seed=s, protocol="random", R=100)
+             for st in ("fedavg", "fedadam") for p in PARTITIONS for s in SEEDS]
+    cfgs += [RunConfig(kind="fed", strategy=st, partition=p, seed=s, protocol="random", R=100)
+             for st in STRATEGIES if st not in ("fedavg", "fedadam") for p in PARTITIONS for s in SEEDS]
+    return cfgs
 
 
 def dry_configs() -> list[RunConfig]:
@@ -108,7 +113,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--suite", choices=["main", "r100"], default="main",
-                    help="r100: random protocol, R = 100, FedAvg/FedAdam -> results/r100/")
+                    help="r100: random protocol, R = 100, centralized + all strategies -> results/r100/")
     args = ap.parse_args()
 
     data = Path(os.environ.get("FEDSDN_DATA", "./data"))

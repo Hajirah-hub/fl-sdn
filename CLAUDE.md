@@ -268,8 +268,14 @@ sign flip (−update) and targeted (malicious clients relabel attack rows as Nor
   round (ties → earliest). The test set is never used for selection. Also reported: final round
   and AUC (mean test macro-F1 over rounds). Centralized baseline holds out a stratified 10% of the
   training pool as validation.
+- **Rounds per protocol**: chrono and poisoning at R = 30 (`results/chrono/`). The random protocol
+  headline is R = 100 for all 7 strategies with a 100-epoch centralized baseline
+  (`run_reduced.py --suite r100` → `results/r100/random/`); the R = 30 random runs
+  (`results/random/`) are kept only for the R = 30 vs R = 100 comparison (R = 30 was too short:
+  val-selected rounds sat near the end and T95 was censored almost everywhere).
 - T95 = first round with test macro-F1 ≥ 0.95 × the protocol's mean centralized val-selected
-  macro-F1 (censored otherwise). Bytes per round = params × 4 B × 2K.
+  macro-F1, centralized trained for as many epochs as the protocol has rounds (censored
+  otherwise). Bytes per round = params × 4 B × 2K.
 - Diagnostics (`scripts/diag_central.py`, chrono, seed 0): the baseline is neither underfitting
   (train F1 0.88) nor undertrained (100 epochs: test F1 0.52); random split gives 0.95. The gap is
   distribution shift: BFA test recall 0 (held-out address pair), Probe ≈ 0.3.
