@@ -7,6 +7,7 @@
     python scripts/run_study.py --suite local     # random, local-only baseline, 100 epochs per client
     python scripts/run_study.py --suite poison_random   # random P3 m1, R = 100, 4 rules x 2 attacks
     python scripts/run_study.py --suite lr_boundary     # tuning seed: lr 0.4 / 0.6 vs frozen best (record only)
+    python scripts/run_study.py --suite lr_sensitivity  # random, R = 100: FedAvg / FedProx at client lr 0.6
     python scripts/run_study.py --suite tuning --dry    # 2 rounds, 1 trial -> results/dry_v2/
     tail -f results/progress.log
 
@@ -53,6 +54,7 @@ TUNE_SEED, N_TRIALS = 99, 12
 POISON_STRATEGIES = ("fedavg", "krum", "median", "trimmed_mean")
 BOUNDARY_STRATEGIES = ("fedavg", "fednova", "fedprox", "scaffold")
 BOUNDARY_LRS = (0.4, 0.6)
+SENSITIVITY_STRATEGIES, SENSITIVITY_LR = ("fedavg", "fedprox"), 0.6
 ATTACKS = ("sign_flip", "targeted")
 TUNED_KEYS = {"lr", "mu", "server_lr", "eps"}
 TUNE_LIKE = ("tuning", "lr_boundary")          # suites scored on validation only
@@ -193,6 +195,10 @@ def suite_configs(suite: str, tuned: dict[str, dict]) -> list[RunConfig]:
     if suite == "poison_random":
         return [fed(st, partition="P3_m1", seed=s, protocol="random", R=100, attack=a, f=2)
                 for st in POISON_STRATEGIES for a in ATTACKS for s in SEEDS]
+    if suite == "lr_sensitivity":     # sensitivity only, not the headline: frozen values except lr
+        return [RunConfig(kind="fed", strategy=st, partition=p, seed=s, protocol="random", R=100,
+                          tag=f"lr{SENSITIVITY_LR}", **{**tuned[st], "lr": SENSITIVITY_LR})
+                for st in SENSITIVITY_STRATEGIES for p in MAIN_PARTITIONS for s in SEEDS]
     if suite == "lr_boundary":        # same setup as tuning; only the client lr changes
         return [RunConfig(kind="fed", strategy=st, partition=p, seed=TUNE_SEED, protocol="random", R=30,
                           tag=f"lr{lr}", **{**tuned[st], "lr": lr})
@@ -272,7 +278,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--suite", required=True,
                     choices=["tuning", "random", "chrono", "sweep", "local", "poison_random",
-                             "lr_boundary"])
+                             "lr_boundary", "lr_sensitivity"])
     ap.add_argument("--dataset", default="insdn")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--dry", action="store_true", help="2 rounds, a few runs, results/dry_v2/")
@@ -328,6 +334,13 @@ def main() -> None:
                 cells = [f"{k}={np.mean(v):.3f}(n{len(v)})" for k, v in sorted(sel_by.items())]
                 emit(f"--- [{args.suite}] after {i} runs, mean {what}: " + " ".join(cells))
     n = collect(results)
+    if n and (results / "summary.csv").exists():
+        sm = pd.read_csv(results / "summary.csv")
+        bad = {c: sm[c].fillna(False).astype(bool) for c in ("diverged", "collapsed") if c in sm}
+        if bad:
+            emit(f"--- [{args.suite}] " + ", ".join(f"{c}: {int(v.sum())}/{len(sm)}" for c, v in bad.items())
+                 + (" -> " + " ".join(sm.loc[bad.get("collapsed", bad["diverged"]), "run_id"]) if
+                    bad.get("collapsed", bad["diverged"]).any() else ""))
     if args.suite == "tuning" and not args.dry:
         freeze_tuning(results, args.dataset)
         emit(f"--- [tuning] frozen values -> configs/tuning/{args.dataset}.yaml")

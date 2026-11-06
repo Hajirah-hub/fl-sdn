@@ -162,6 +162,17 @@ def test_metrics(y: np.ndarray, pred: np.ndarray, C: int, rare: int, names: list
     return out
 
 
+COLLAPSE_HI, COLLAPSE_LO = 0.99, 0.01
+
+
+def is_collapsed(recalls) -> bool:
+    """Collapse: the model predicts (nearly) one class for every test flow, i.e. one class has
+    test recall >= 0.99 and every other class <= 0.01. Uses only per-class recalls, so it can be
+    applied to logged rounds after the fact; a diverged (NaN) model also counts as collapsed."""
+    r = np.sort(np.asarray(recalls, float))[::-1]
+    return bool(r[0] >= COLLAPSE_HI and (r[1:] <= COLLAPSE_LO).all())
+
+
 def select_round(val_f1: list[float]) -> int:
     """Index (0-based) of the best validation macro-F1; ties -> earliest round."""
     return int(np.argmax(np.asarray(val_f1)))
@@ -222,7 +233,9 @@ def run(cfg: RunConfig, processed_dir: str, partitions_dir: str, meta: dict) -> 
 
     def record(r, wall):
         vector_to_parameters(w, model.parameters())
-        m = test_metrics(y_test, predict(model, X_test), C, rare, names)
+        pt = predict(model, X_test)
+        m = test_metrics(y_test, pt, C, rare, names)
+        m["top_pred_share"] = float(np.bincount(pt).max() / len(pt))      # share of the most predicted class
         pv = predict(model, X_val)
         per_client = [macro_f1(y_val[val_owner == k], pv[val_owner == k],
                                sorted(set(y_val[val_owner == k].tolist())))
@@ -310,6 +323,7 @@ def run(cfg: RunConfig, processed_dir: str, partitions_dir: str, meta: dict) -> 
         "bytes_per_round": int(final["bytes"]), "n_params": n_params,
         "malicious": " ".join(map(str, malicious)),
         "diverged": diverged,
+        "collapsed": is_collapsed([final[f"recall_{n}"] for n in names]),
         "lr": cfg.lr, "mu": cfg.mu, "server_lr": cfg.server_lr, "eps": cfg.eps, "tag": cfg.tag,
         "wall_s": round(time.perf_counter() - t_start, 2),
     }

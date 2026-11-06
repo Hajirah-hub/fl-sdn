@@ -251,45 +251,56 @@ checkpoint_every: 1
 - Test: a run interrupted and resumed must give results identical to an uninterrupted run.
 - Kaggle sessions are time-limited: drivers take a list of configs and rely on this to continue.
 
-## Reduced study (time-boxed; plain PyTorch, no Flower/Ray)
+## Reduced study v2 (plain PyTorch, no Flower/Ray)
 
-`src/fedsdn/sim.py` + `scripts/run_reduced.py` (runs, resumable via per-run JSON markers,
-`results/progress.log`) + `scripts/report_reduced.py` (`results/report/`). InSDN, multi-class only,
-K = 8, E = 1, R = 30, batch 256, SGD lr 0.05, MLP; partitions P0, P1 α=0.5, P3 m=1, P4; seeds 0–2.
-Strategies: FedAvg, FedProx (μ 0.01), FedNova, FedAdam (server lr 0.01, β 0.9/0.99, ε 1e-3),
-Krum / Median / Trimmed Mean (f̂ = 2, clients weighted equally). Poisoning (chrono only): P4, f = 2,
-sign flip (−update) and targeted (malicious clients relabel attack rows as Normal).
-- **Protocols**: `chrono` (primary; `processed/insdn`, `partitions/insdn`) and `random` (secondary
-  random stratified 80/20 split of the same rows, by partition family, seed 0;
-  `processed/insdn_random`, `partitions/insdn_random`; `scripts/make_random_split.py`). The random
-  protocol is a leakage diagnostic only, never compared directly with chrono.
-- **Headline metric = val-selected test macro-F1**: every round logs global validation macro-F1
-  (pooled over all clients' validation sets); the run reports test metrics at the best-validation
-  round (ties → earliest). The test set is never used for selection. Also reported: final round
-  and AUC (mean test macro-F1 over rounds). Centralized baseline holds out a stratified 10% of the
-  training pool as validation.
-- **Rounds per protocol**: chrono and poisoning at R = 30 (`results/chrono/`). The random protocol
-  headline is R = 100 for all 7 strategies with a 100-epoch centralized baseline
-  (`run_reduced.py --suite r100` → `results/r100/random/`); the R = 30 random runs
-  (`results/random/`) are kept only for the R = 30 vs R = 100 comparison (R = 30 was too short:
-  val-selected rounds sat near the end and T95 was censored almost everywhere).
-- T95 = first round with test macro-F1 ≥ 0.95 × the protocol's mean centralized val-selected
-  macro-F1, centralized trained for as many epochs as the protocol has rounds (censored
-  otherwise). Bytes per round = params × 4 B × 2K.
-- Diagnostics (`scripts/diag_central.py`, chrono, seed 0): the baseline is neither underfitting
-  (train F1 0.88) nor undertrained (100 epochs: test F1 0.52); random split gives 0.95. The gap is
-  distribution shift: BFA test recall 0 (held-out address pair), Probe ≈ 0.3.
-- Old chrono results without validation logging: `results/archive_chrono_v1_noval/`.
-- Paper outputs: `scripts/paper_outputs.py` → `results/paper_tables/*.csv` (3 decimals, mean/std in
-  separate columns; Friedman + Nemenyi on random R = 100 val-selected macro-F1, blocks =
-  partition × seed) and `results/paper_figures/*.png` (300 dpi, 3.5 in single column, Okabe-Ito
-  colors fixed per strategy, no titles). Never built from `results/dry`.
-  Font: STIXGeneral (Times-like, bundled with matplotlib). Architecture / pipeline diagrams:
-  `scripts/paper_diagrams.py` → fig0_system_architecture, fig_model_architecture, fig_pipeline.
-- Flower validation (`scripts/flower_validation.py`, WSL venv, `PYTHONPATH=src`): random protocol,
-  P4, seed 0, R = 30; built-in Flower FedAvg / FedMedian and a custom Flower strategy calling our
-  FedAdam; clients reuse `sim.local_train`; scaling + class weights via a federated QUERY round.
-  Matches the plain loop run with `RunConfig(per_step_seed=True)` (dropout re-seeded per
-  (round, client), as in Flower's per-actor processes) to max |ΔF1| ≤ 0.0012; serialized
-  messages are 1.028 × the derived params × 4 B × 2K. Outputs: `paper_tables/flower_validation.csv`,
-  `paper_figures/fig7_flower_vs_loop.png`, `results/flower_validation/`.
+`src/fedsdn/sim.py` + `scripts/run_study.py --suite <name>` (resumable via per-run JSON markers in
+`$FEDSDN_RESULTS/<suite>/runs/`; all suites log to `results/progress.log`) + `scripts/paper_outputs.py`.
+InSDN, multi-class only, K = 8, E = 1, batch 256, plain SGD, MLP, seeds 0–4. 8 strategies:
+FedAvg, FedProx, FedNova, FedAdam (β 0.9/0.99, no bias correction), SCAFFOLD, Krum / Median /
+Trimmed Mean (f̂ = 2, clients weighted equally). Write-up: `docs/experiment_writeup.md`.
+- **Tuning** (`--suite tuning`, Section III-H): 12 random-search trials per strategy and for the
+  centralized baseline; client lr log-uniform [1e-3, 3e-1] drawn ONCE (rng 99) and shared; FedProx μ
+  [1e-3, 1], FedAdam server lr [1e-2, 1] and ε [1e-3, 1e-1] per trial. Random protocol, R = 30,
+  tuning seed 99 with its own partitions (P1 α0.5, P3 m1, P4). Score = mean over partitions of the
+  best pooled validation macro-F1 (never test); diverged trials ineligible. **Frozen in
+  `configs/tuning/insdn.yaml` — every later suite reads it; never edit by hand or re-tune casually.**
+- **Suites**: `random` (R = 100, 8 strategies × P0 / P1 α0.5 / P3 m1 / P4 × seeds 0–4, centralized
+  100 epochs), `chrono` (same grid at R = 30 + poisoning on P4), `sweep` (FedAvg / FedAdam, P1 α
+  0.1 / 1 / 10 and P2 β0.5, R = 100), `local` (local-only baseline, 100 epochs per client, scored on
+  the global test set), `poison_random` (P3 m1, R = 100; records whether a malicious client is the
+  sole holder of an attack family), `lr_boundary` (seed 99, lr 0.4 / 0.6, validation only, record
+  only) and `lr_sensitivity` (FedAvg / FedProx at lr 0.6 on the random grid; sensitivity, not
+  headline). `--dry` → `results/dry_v2/` (never used for outputs).
+- **SCAFFOLD**: option II, global step 1, variates aggregated with n_k weights (so frozen-zero
+  variates == FedAvg, tested); client variates persist across rounds keyed by client id; bytes 2×.
+- **Failure flags** in every summary: `diverged` (non-finite weights) and `collapsed` (final round:
+  one class recall ≥ 0.99, all others ≤ 0.01; `sim.is_collapsed`). `scripts/add_collapse_flag.py`
+  backfills older summaries. At the tuned lr, SCAFFOLD diverges in 25% (random) / 45% (chrono) of
+  runs and centralized random seed 4 collapses → centralized and T95 / gap regression are reported
+  with all seeds and with stable seeds.
+- **Protocols**: `chrono` (`processed/insdn`, `partitions/insdn`) and `random` (secondary random
+  stratified 80/20 split, `processed/insdn_random`, `partitions/insdn_random`;
+  `scripts/make_random_split.py`). Random has flow-level leakage: never compare its absolute
+  scores with chrono. Statistics and tuning use random.
+- **Headline metric = val-selected test macro-F1** (best pooled validation round, ties → earliest;
+  test never used for selection); also final round and AUC. Centralized holds out a stratified
+  10% of the training pool as validation. A round never depends on R, so R = 30 results are the
+  first 30 rounds of the R = 100 runs.
+- T95 = first round with test macro-F1 ≥ 0.95 × mean centralized val-selected macro-F1 (epochs =
+  rounds). Bytes per round = params × 4 B × 2K (SCAFFOLD × 2).
+- **Statistics** (`paper_outputs.py`, random R = 100, blocks = partition × seed = 20): Friedman +
+  Nemenyi, Wilcoxon vs FedAvg + Holm, bootstrap CIs (seeds resampled within partition), OLS of the
+  gap to centralized on realized JSD and CV (main grid + sweep).
+- Paper outputs: `results/paper_tables/*.csv` (3 decimals, mean/std in separate columns, p-values
+  3 significant digits) and `results/paper_figures/*.png` (300 dpi, 3.5 in single column, ≥ 8 pt,
+  Okabe-Ito colors fixed per strategy, SCAFFOLD grey #999999, centralized black, no titles, font
+  STIXGeneral). Diagrams: `scripts/paper_diagrams.py`. Never built from `results/dry*`.
+- **v1 archive**: the untuned 7-strategy, 3-seed study (lr 0.05; `scripts/run_reduced.py`,
+  `report_reduced.py`, `diag_central.py`) is in `results/archive_v1/` — kept, never deleted, not
+  used for v2 outputs.
+- Flower validation (`scripts/flower_validation.py`, WSL venv, `PYTHONPATH=src`; run in v1): random
+  protocol, P4, seed 0, R = 30, lr 0.05; built-in Flower FedAvg / FedMedian and a custom Flower
+  strategy calling our FedAdam; clients reuse `sim.local_train`. Matches the plain loop run with
+  `RunConfig(per_step_seed=True)` to max |ΔF1| ≤ 0.0012; serialized messages are 1.028 × the
+  derived size. `results/flower_validation/` is a copy of the archived run; `--plot-only` rebuilds
+  `paper_tables/flower_validation.csv` and `paper_figures/fig7_flower_vs_loop.png`.

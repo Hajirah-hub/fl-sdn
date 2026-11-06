@@ -91,10 +91,14 @@ def load(d: Path) -> dict:
     thr = 0.95 * central["sel_macro_f1"].mean() if len(central) else np.nan
     fed = s[s.kind == "fed"]
     clean = fed[fed.attack == "none"]
+    thr_stable = np.nan
     if len(central):
+        thr_stable = 0.95 * stable(central)["sel_macro_f1"].mean()
+        st = add_t95(clean, r, thr_stable)
         clean = add_t95(clean, r, thr)
+        clean["t95_stable"], clean["t95_stable_censored"] = st["t95"].to_numpy(), st["t95_censored"].to_numpy()
     return {"summary": s, "rounds": r, "central": central, "clean": clean, "thr": thr,
-            "R": int(s["R"].max()), "poison": fed[fed.attack != "none"]}
+            "thr_stable": thr_stable, "R": int(s["R"].max()), "poison": fed[fed.attack != "none"]}
 
 
 def ms(x: pd.Series) -> tuple[float, float]:
@@ -135,6 +139,52 @@ def holm(p: np.ndarray) -> np.ndarray:
     return adj
 
 
+def wilcoxon_rows(blocks: pd.DataFrame, pairs: list[tuple[str, str]]) -> pd.DataFrame:
+    """Two-sided Wilcoxon signed-rank (a - b) over the blocks; Holm over the given pairs.
+    Effect sizes: median / mean difference and matched-pairs rank-biserial r (zeros dropped)."""
+    rows = []
+    for a, b in pairs:
+        diff = (blocks[a] - blocks[b]).to_numpy()
+        nz = diff[diff != 0]
+        rk = rankdata(np.abs(nz))
+        w_pos, w_neg = rk[nz > 0].sum(), rk[nz < 0].sum()
+        test = wilcoxon(blocks[a], blocks[b], alternative="two-sided", zero_method="wilcox")
+        rows.append({"strategy": a, "baseline": b, "n_blocks": len(diff), "n_nonzero": len(nz),
+                     "n_better": int((diff > 0).sum()), "n_worse": int((diff < 0).sum()),
+                     "median_diff": np.median(diff), "mean_diff": diff.mean(),
+                     "w_plus": w_pos, "w_minus": w_neg, "wilcoxon_statistic": float(test.statistic),
+                     "p_raw": float(test.pvalue),
+                     "rank_biserial_r": (w_pos - w_neg) / (w_pos + w_neg) if len(nz) else 0.0})
+    wt = pd.DataFrame(rows)
+    wt["p_holm"] = holm(wt.p_raw.to_numpy())
+    wt["significant_holm_0.05"] = wt.p_holm < 0.05
+    for c in ("median_diff", "mean_diff", "w_plus", "w_minus", "wilcoxon_statistic", "rank_biserial_r"):
+        wt[c] = wt[c].round(3)
+    for c in ("p_raw", "p_holm"):
+        wt[c] = wt[c].map(p3s)
+    return wt
+
+
+def bootstrap_rows(blocks: pd.DataFrame, pairs: list[tuple[str, str]]) -> pd.DataFrame:
+    """95% percentile CI of the mean difference (a - b); seeds resampled within each partition."""
+    rng = np.random.default_rng(0)
+    idx = rng.integers(0, len(SEEDS), size=(N_BOOT, len(PARTS), len(SEEDS)))
+    rows = []
+    for a, b in pairs:
+        d = (blocks[a] - blocks[b]).unstack("seed").loc[PARTS, SEEDS].to_numpy()          # 4 x 5
+        boot = np.take_along_axis(np.broadcast_to(d, (N_BOOT, *d.shape)), idx, axis=2).mean(axis=(1, 2))
+        lo, hi = np.percentile(boot, [2.5, 97.5])
+        rows.append({"strategy": a, "baseline": b, "mean_diff": d.mean(), "ci95_low": lo, "ci95_high": hi,
+                     "ci_excludes_zero": bool(lo > 0 or hi < 0), "n_boot": N_BOOT,
+                     "resampling": "seeds within partition (stratified), percentile"})
+    return pd.DataFrame(rows)
+
+
+def stable(central: pd.DataFrame) -> pd.DataFrame:
+    """Centralized runs that neither diverged nor collapsed by their final epoch."""
+    return central[~central.diverged.astype(bool) & ~central.collapsed.astype(bool)]
+
+
 def main() -> None:
     res = Path(os.environ.get("FEDSDN_RESULTS", "./results"))
     data_dir = Path(os.environ.get("FEDSDN_DATA", "./data"))
@@ -168,6 +218,11 @@ def main() -> None:
         m, sd = ms(d["central"].sel_macro_f1)
         rows.append({"protocol": pname, "rounds": d["R"], "strategy": "centralized", "partition": "all",
                      "macro_f1_mean": m, "macro_f1_std": sd, "n_seeds": len(d["central"])})
+        st = stable(d["central"])
+        m, sd = ms(st.sel_macro_f1)
+        rows.append({"protocol": pname, "rounds": d["R"], "strategy": "centralized (stable seeds)",
+                     "partition": "seeds " + " ".join(map(str, sorted(st.seed))),
+                     "macro_f1_mean": m, "macro_f1_std": sd, "n_seeds": len(st)})
     t_head = pd.DataFrame(rows)
     r3(t_head).to_csv(tab / "table_valselected_macro_f1.csv", index=False)
 
@@ -195,15 +250,18 @@ def main() -> None:
                 m, sd = ms(g.sel_worst_client_val_f1)
                 rows_worst.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
                                    "worst_client_val_macro_f1_mean": m, "worst_client_val_macro_f1_std": sd})
-                hit = g[~g.t95_censored]
                 bpr = int(g.bytes_per_round.iloc[0])
-                rows_t95.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
-                                 "t95_threshold": d["thr"], "n_reached": len(hit),
-                                 "n_censored": int(g.t95_censored.sum()),
-                                 "t95_rounds_mean_reached": hit.t95.mean() if len(hit) else np.nan,
-                                 "t95_rounds_std_reached": hit.t95.std(ddof=1) if len(hit) > 1 else (0.0 if len(hit) else np.nan),
-                                 "mb_to_t95_mean_reached": hit.t95.mean() * bpr / 1e6 if len(hit) else np.nan,
-                                 "bytes_per_round": bpr, "mb_per_round": bpr / 1e6})
+                n_st = len(stable(d["central"]))
+                for ref, col, thr_ in ((f"all {len(d['central'])} seeds", "t95", d["thr"]),
+                                       (f"stable {n_st} seeds", "t95_stable", d["thr_stable"])):
+                    hit = g[~g[f"{col}_censored"]][col]
+                    rows_t95.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
+                                     "centralized_reference": ref, "t95_threshold": thr_, "n_reached": len(hit),
+                                     "n_censored": int(g[f"{col}_censored"].sum()),
+                                     "t95_rounds_mean_reached": hit.mean() if len(hit) else np.nan,
+                                     "t95_rounds_std_reached": hit.std(ddof=1) if len(hit) > 1 else (0.0 if len(hit) else np.nan),
+                                     "mb_to_t95_mean_reached": hit.mean() * bpr / 1e6 if len(hit) else np.nan,
+                                     "bytes_per_round": bpr, "mb_per_round": bpr / 1e6})
     r3(pd.DataFrame(rows)).to_csv(tab / "table_final_auc_macro_f1.csv", index=False)
     r3(pd.DataFrame(rows_cls)).to_csv(tab / "table_per_class_recall.csv", index=False)
     r3(pd.DataFrame(rows_worst)).to_csv(tab / "table_worst_client_val_f1.csv", index=False)
@@ -344,58 +402,31 @@ def main() -> None:
     sig_pairs = [(a, b, nem.loc[a, b]) for a, b in combinations(STRATS, 2) if nem.loc[a, b] < 0.05]
 
     others = [x for x in STRATS if x != "fedavg"]
-    wrows = []
-    for s in others:
-        diff = (blocks[s] - blocks["fedavg"]).to_numpy()
-        nz = diff[diff != 0]
-        rk = rankdata(np.abs(nz))
-        w_pos, w_neg = rk[nz > 0].sum(), rk[nz < 0].sum()
-        test = wilcoxon(blocks[s], blocks["fedavg"], alternative="two-sided", zero_method="wilcox")
-        wrows.append({"strategy": s, "baseline": "fedavg", "n_blocks": len(diff), "n_nonzero": len(nz),
-                      "n_better": int((diff > 0).sum()), "n_worse": int((diff < 0).sum()),
-                      "median_diff": np.median(diff), "mean_diff": diff.mean(),
-                      "w_plus": w_pos, "w_minus": w_neg, "wilcoxon_statistic": float(test.statistic),
-                      "p_raw": float(test.pvalue),
-                      "rank_biserial_r": (w_pos - w_neg) / (w_pos + w_neg) if len(nz) else 0.0})
-    wt = pd.DataFrame(wrows)
-    wt["p_holm"] = holm(wt.p_raw.to_numpy())
-    wt["significant_holm_0.05"] = wt.p_holm < 0.05
-    for c in ("median_diff", "mean_diff", "w_plus", "w_minus", "wilcoxon_statistic", "rank_biserial_r"):
-        wt[c] = wt[c].round(3)
-    for c in ("p_raw", "p_holm"):
-        wt[c] = wt[c].map(p3s)
+    wt = wilcoxon_rows(blocks, [(x, "fedavg") for x in others])
     wt["protocol"], wt["rounds"], wt["metric"] = "random", 100, "val-selected test macro-F1"
     wt["blocks"] = "partition x seed (4 x 5)"
     wt["note"] = ("blocks sharing a partition are not fully independent (same partition scheme, "
                   "different seeds), so p-values are approximate; diff = strategy - fedavg")
     wt.to_csv(tab / "stats_wilcoxon_vs_fedavg.csv", index=False)
-
-    rng = np.random.default_rng(0)
-    D = {s: (blocks[s] - blocks["fedavg"]).unstack("seed").loc[PARTS].to_numpy() for s in others}  # 4 x 5
-    idx = rng.integers(0, len(SEEDS), size=(N_BOOT, len(PARTS), len(SEEDS)))
-    brows = []
-    for s in others:
-        d = D[s]
-        boot = np.take_along_axis(np.broadcast_to(d, (N_BOOT, *d.shape)), idx, axis=2).mean(axis=(1, 2))
-        lo, hi = np.percentile(boot, [2.5, 97.5])
-        brows.append({"strategy": s, "baseline": "fedavg", "mean_diff": d.mean(), "ci95_low": lo, "ci95_high": hi,
-                      "ci_excludes_zero": bool(lo > 0 or hi < 0), "n_boot": N_BOOT,
-                      "resampling": "seeds within partition (stratified), percentile"})
-    bt = pd.DataFrame(brows)
+    bt = bootstrap_rows(blocks, [(x, "fedavg") for x in others])
     r3(bt).to_csv(tab / "stats_bootstrap_ci_vs_fedavg.csv", index=False)
 
     # regression of the gap to centralized on realized JSD and CV
     reg_rows, reg_points = [], []
-    for s in STRATS:
+    stable_seeds = sorted(stable(rnd["central"]).seed)
+    for (ref, seeds_ok), s in [((r_, k_), s_) for r_, k_ in ((f"all {len(c_rnd)} seeds", list(c_rnd.index)),
+                                                            (f"stable {len(stable_seeds)} seeds", stable_seeds))
+                               for s_ in STRATS]:
         g = pd.concat([cl[cl.strategy == s], sweep["clean"][sweep["clean"].strategy == s]])
+        g = g[g.seed.isin(seeds_ok)]
         h = het_r.loc[list(zip(g.partition, g.seed))]
         X = pd.DataFrame({"jsd": h.mean_pairwise_jsd.to_numpy(), "cv": h.shard_size_cv.to_numpy()})
         y = c_rnd.loc[g.seed].to_numpy() - g.sel_macro_f1.to_numpy()
-        reg_points.append(pd.DataFrame({"strategy": s, "partition": g.partition.to_numpy(), "seed": g.seed.to_numpy(),
+        reg_points.append(pd.DataFrame({"centralized_reference": ref, "strategy": s, "partition": g.partition.to_numpy(), "seed": g.seed.to_numpy(),
                                         "jsd": X.jsd, "cv": X.cv, "gap": y}))
         fit = sm.OLS(y, sm.add_constant(X)).fit()
         ci = fit.conf_int()
-        reg_rows.append({"strategy": s, "n_runs": len(y), "partitions": " ".join(sorted(g.partition.unique())),
+        reg_rows.append({"centralized_reference": ref, "strategy": s, "n_runs": len(y), "partitions": " ".join(sorted(g.partition.unique())),
                          "intercept": fit.params["const"],
                          "coef_jsd": fit.params["jsd"], "se_jsd": fit.bse["jsd"], "p_jsd": p3s(fit.pvalues["jsd"]),
                          "ci95_jsd_low": ci.loc["jsd", 0], "ci95_jsd_high": ci.loc["jsd", 1],
@@ -405,9 +436,68 @@ def main() -> None:
                          "mean_gap": y.mean()})
     rt = pd.DataFrame(reg_rows)
     rt["note"] = ("gap = centralized val-selected test macro-F1 (same seed) - run's; OLS gap ~ 1 + JSD + CV; "
-                  "random protocol R = 100; fedavg/fedadam include the alpha sweep")
+                  "random protocol R = 100; fedavg/fedadam include the alpha sweep; 'stable' drops runs whose "
+                  "same-seed centralized run collapsed")
     r3(rt).to_csv(tab / "stats_regression_gap.csv", index=False)
     r3(pd.concat(reg_points)).to_csv(tab / "stats_regression_points.csv", index=False)
+
+    # ---------------------------------------------------------------- divergence / collapse
+    rows = []
+    for suite in ("random", "chrono", "sweep", "poison_random", "lr_sensitivity", "tuning", "lr_boundary"):
+        f = res / suite / "summary.csv"
+        if not f.exists():
+            continue
+        sm_ = pd.read_csv(f)
+        for c in ("diverged", "collapsed"):
+            sm_[c] = sm_[c].fillna(False).astype(bool)
+        for (proto, st, att), g in sm_.groupby(["protocol", "strategy", "attack"]):
+            rows.append({"suite": suite, "protocol": proto, "rounds": int(g.R.max()), "strategy": st, "attack": att,
+                         "n_runs": len(g), "n_diverged": int(g.diverged.sum()), "n_collapsed_final": int(g.collapsed.sum()),
+                         "diverged_rate": g.diverged.mean(), "collapsed_rate": g.collapsed.mean(),
+                         "collapsed_runs": " ".join(g[g.collapsed].run_id),
+                         "val_selected_f1_mean_collapsed": g[g.collapsed].sel_macro_f1.mean() if g.collapsed.any() else np.nan,
+                         "val_selected_f1_mean_ok": g[~g.collapsed].sel_macro_f1.mean() if (~g.collapsed).any() else np.nan})
+    t_fail = pd.DataFrame(rows)
+    t_fail["note"] = ("diverged = non-finite weights; collapsed = at the final round one class has test recall >= 0.99 "
+                      "and all others <= 0.01 (predictions nearly all one class; includes diverged runs)")
+    r3(t_fail).to_csv(tab / "table_divergence_collapse.csv", index=False)
+
+    # ---------------------------------------------------------------- lr boundary + sensitivity
+    if (res / "lr_boundary" / "lr_boundary.csv").exists():
+        r3(pd.read_csv(res / "lr_boundary" / "lr_boundary.csv")).to_csv(tab / "table_lr_boundary.csv", index=False)
+    sens = None
+    if (res / "lr_sensitivity" / "summary.csv").exists():
+        sens = pd.read_csv(res / "lr_sensitivity" / "summary.csv")
+        sens["strategy"] = sens.strategy + "_lr0.6"
+        sb = pd.concat([blocks, sens.pivot_table(index=["partition", "seed"], columns="strategy",
+                                                 values="sel_macro_f1")], axis=1)
+        assert sb.shape[0] == 20 and not sb.isna().any().any()
+        fam_a = [("fedadam", "fedavg_lr0.6"), ("fedadam", "fedprox_lr0.6")]
+        fam_b = [("fedavg_lr0.6", "fedavg"), ("fedprox_lr0.6", "fedprox")]
+        parts_ = []
+        for fam, name in ((fam_a, "FedAdam vs lr-0.6 baselines"), (fam_b, "lr 0.6 vs frozen lr")):
+            w_ = wilcoxon_rows(sb, fam).merge(bootstrap_rows(sb, fam)[["strategy", "baseline", "ci95_low", "ci95_high",
+                                                                       "ci_excludes_zero"]], on=["strategy", "baseline"])
+            w_["family"] = name
+            parts_.append(w_)
+        ts = pd.concat(parts_)
+        ts["note"] = ("sensitivity only (not the headline): FedAvg / FedProx rerun at client lr 0.6, all else frozen; "
+                      "random protocol R = 100, 20 blocks; Holm within each family of 2")
+        r3(ts).to_csv(tab / "stats_lr_sensitivity.csv", index=False)
+        rows = []
+        for st in ("fedavg", "fedprox"):
+            for p_ in PARTS:
+                fz = cell(rnd, st, p_)
+                s6 = sens[(sens.strategy == f"{st}_lr0.6") & (sens.partition == p_)]
+                rows.append({"strategy": st, "partition": p_,
+                             "frozen_lr": float(fz.lr.iloc[0]), "frozen_macro_f1_mean": fz.sel_macro_f1.mean(),
+                             "frozen_macro_f1_std": fz.sel_macro_f1.std(ddof=1),
+                             "lr0.6_macro_f1_mean": s6.sel_macro_f1.mean(), "lr0.6_macro_f1_std": s6.sel_macro_f1.std(ddof=1),
+                             "lr0.6_final_macro_f1_mean": s6.final_macro_f1.mean(),
+                             "lr0.6_n_diverged": int(s6.diverged.astype(bool).sum()),
+                             "lr0.6_n_collapsed": int(s6.collapsed.astype(bool).sum()),
+                             "fedadam_macro_f1_mean": cell(rnd, "fedadam", p_).sel_macro_f1.mean()})
+        r3(pd.DataFrame(rows)).to_csv(tab / "table_lr_sensitivity.csv", index=False)
 
     # ---------------------------------------------------------------- figures
     # fig1 leakage diagnostic
@@ -431,7 +521,7 @@ def main() -> None:
     fig, axes = plt.subplots(1, 2, figsize=(DOUBLE, 3.6), sharey=True, gridspec_kw={"wspace": 0.06})
     for ax, (pname, d, lab) in zip(axes, (("random", rnd, "(a) Random split, R = 100"),
                                            ("chronological", chrono, "(b) Chronological split, R = 30"))):
-        th = t_head[(t_head.protocol == pname) & (t_head.strategy != "centralized")]
+        th = t_head[(t_head.protocol == pname) & ~t_head.strategy.str.startswith("centralized")]
         M = th.pivot(index="strategy", columns="partition", values="macro_f1_mean").loc[STRATS, PARTS]
         S = th.pivot(index="strategy", columns="partition", values="macro_f1_std").loc[STRATS, PARTS]
         im = ax.imshow(M.to_numpy(), cmap="viridis", vmin=0, vmax=1, aspect="auto")
@@ -576,7 +666,8 @@ def main() -> None:
                color=COLOR[s], edgecolor="k", lw=0.3, capsize=1.2, error_kw={"lw": 0.5}, label=LABEL[s])
     ax.axhline(cm, color="k", ls="--", lw=0.9, label="Centralized")
     jsd = t_sweep[t_sweep.strategy == "fedavg"].set_index("partition").loc[sw_parts, "mean_jsd"]
-    ax.set_xticks(x, [f"{PLABEL[p].replace(' (', chr(10) + '(')}\nJSD {jsd[p]:.2f}" for p in sw_parts])
+    ax.set_xticks(x, [f"{PLABEL[p].replace(' (', chr(10) + '(')}\n{jsd[p]:.2f}" for p in sw_parts])
+    ax.set_xlabel("Partition (second line: mean realized JSD)")
     ax.set_ylabel("Val-selected test macro-F1")
     ax.set_ylim(0, 1.05)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.2), ncol=3)
@@ -585,15 +676,21 @@ def main() -> None:
     # fig10 regression coefficients (gap ~ JSD + CV), 95% CI
     fig, axes = plt.subplots(1, 2, figsize=(SINGLE, 2.4), sharey=True, gridspec_kw={"wspace": 0.12})
     yy = np.arange(len(STRATS))[::-1]
+    refs = list(rt.centralized_reference.unique())
     for ax, (v, lab) in zip(axes, (("jsd", "JSD coefficient"), ("cv", "CV coefficient"))):
-        for yi, s in zip(yy, STRATS):
-            r_ = rt.set_index("strategy").loc[s]
-            ax.errorbar(r_[f"coef_{v}"], yi, xerr=[[r_[f"coef_{v}"] - r_[f"ci95_{v}_low"]],
-                                                   [r_[f"ci95_{v}_high"] - r_[f"coef_{v}"]]],
-                        fmt="o", ms=3, color=COLOR[s] if s != "trimmed_mean" else "#B8A800", elinewidth=0.9, capsize=1.5)
+        for ri, (ref, mk, dy) in enumerate(zip(refs, ("o", "s"), (0.15, -0.15))):
+            rr_ = rt[rt.centralized_reference == ref].set_index("strategy")
+            for yi, s in zip(yy, STRATS):
+                r_ = rr_.loc[s]
+                ax.errorbar(r_[f"coef_{v}"], yi + dy, xerr=[[r_[f"coef_{v}"] - r_[f"ci95_{v}_low"]],
+                                                            [r_[f"ci95_{v}_high"] - r_[f"coef_{v}"]]],
+                            fmt=mk, ms=2.6, mfc=None if ri == 0 else "white",
+                            color=COLOR[s] if s != "trimmed_mean" else "#B8A800", elinewidth=0.8, capsize=1.2,
+                            label=("centralized: " + ref) if (s == "fedavg" and v == "jsd") else None)
         ax.axvline(0, color="k", lw=0.6)
         ax.set_xlabel(lab)
     axes[0].set_yticks(yy, [LABEL[s] for s in STRATS])
+    fig.legend(loc="upper center", bbox_to_anchor=(0.55, 1.06), ncol=2, handletextpad=0.3)
     save(fig, figd / "fig10_gap_regression.png")
 
     # fig11 bootstrap CI of difference to FedAvg
@@ -638,7 +735,10 @@ def main() -> None:
     print(wt[["strategy", "median_diff", "mean_diff", "n_better", "n_worse", "rank_biserial_r", "p_raw", "p_holm",
               "significant_holm_0.05"]].to_string(index=False))
     print(r3(bt[["strategy", "mean_diff", "ci95_low", "ci95_high", "ci_excludes_zero"]]).to_string(index=False))
-    print(r3(rt[["strategy", "n_runs", "coef_jsd", "p_jsd", "coef_cv", "p_cv", "r2", "corr_jsd_cv"]]).to_string(index=False))
+    if sens is not None:
+        print(ts[["family", "strategy", "baseline", "n_better", "n_worse", "mean_diff", "p_holm", "ci95_low",
+                  "ci95_high"]].to_string(index=False))
+    print(r3(rt[["centralized_reference", "strategy", "n_runs", "coef_jsd", "p_jsd", "coef_cv", "p_cv", "r2", "corr_jsd_cv"]]).to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import torch
 from torch.nn.utils import parameters_to_vector
 
 from fedsdn.models import MLP
-from fedsdn.sim import RunConfig, local_train
+from fedsdn.sim import RunConfig, is_collapsed, local_train
 from fedsdn.strategies.aggregate import (
     Scaffold, coordinate_median, fedavg, fednova, krum, trimmed_mean,
 )
@@ -98,3 +98,10 @@ def test_scaffold_client_variate_formula():
     sc.step(U, torch.tensor([1.0]), torch.tensor([4.0]), 0.1, [0])
     torch.testing.assert_close(sc.c_k[0], torch.tensor([-0.5, 1.0]))
     torch.testing.assert_close(sc.c, torch.tensor([-0.5, 1.0]))
+
+
+def test_collapse_flag():
+    assert is_collapsed([1.0, 0.0, 0.0, 0.0, 0.0])          # everything predicted as Normal
+    assert is_collapsed([0.0, 0.0, 0.995, 0.005, 0.0])
+    assert not is_collapsed([1.0, 0.02, 0.0, 0.0, 0.0])
+    assert not is_collapsed([0.97, 0.9, 0.95, 0.99, 0.8])

@@ -24,7 +24,7 @@ INK = "#222222"
 FILL = "#F2F2F2"
 FILL2 = "#E3ECF5"
 MAL = "#D55E00"          # Okabe-Ito vermillion (colorblind-safe red)
-TEXT_STRAT = {**COLOR, "trimmed_mean": "#9C8E00"}   # darker yellow so text stays readable
+TEXT_STRAT = {**COLOR, "trimmed_mean": "#9C8E00", "scaffold": "#6E6E6E"}   # darker so text stays readable
 
 
 def canvas(w: float, h: float):
@@ -190,12 +190,12 @@ def fig_pipeline(out: Path) -> None:
         centers.append((x, y))
     # strategy names in their colors
     x, y = centers[4]
-    rows = [STRATS[:4], STRATS[4:]]
-    fracs = ([0.13, 0.37, 0.62, 0.87], [0.13, 0.33, 0.55, 0.83])
+    rows = [STRATS[:3], STRATS[3:6], STRATS[6:]]
+    fracs = ([0.2, 0.5, 0.8], [0.2, 0.5, 0.8], [0.32, 0.68])
     for ri, row in enumerate(rows):
         for fx, s in zip(fracs[ri], row):
-            text(ax, x + bw * fx, y + 0.5 - ri * 0.2, LABEL[s], color=TEXT_STRAT[s], fontweight="bold")
-    text(ax, x + bw / 2, y + 0.12, "poisoning: f = 2 of 8 (chrono P4, random P3)", color=MAL)
+            text(ax, x + bw * fx, y + 0.56 - ri * 0.15, LABEL[s], color=TEXT_STRAT[s], fontweight="bold")
+    text(ax, x + bw / 2, y + 0.1, "poisoning: f = 2 of 8 (chrono P4, random P3)", color=MAL)
     # arrows along the rows and the turn
     for a, b in ((0, 1), (1, 2), (3, 4), (4, 5)):
         xa, ya = centers[a]
