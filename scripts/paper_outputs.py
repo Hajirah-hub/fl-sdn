@@ -11,7 +11,10 @@ Okabe-Ito colorblind-safe palette, fixed color per strategy, no titles).
 Leakage diagnostic (fig1, table_leakage_diagnostic): centralized baseline, 30 epochs on both
 protocols (same training budget), seeds 0-2, val-selected epoch.
 Statistics: Friedman test over the 7 strategies on val-selected test macro-F1 of the random
-protocol at R = 100, blocks = partition x seed (12); Nemenyi post-hoc; alpha = 0.05.
+protocol at R = 100, blocks = partition x seed (12); Nemenyi post-hoc; alpha = 0.05. Planned
+pairwise tests: Wilcoxon signed-rank of each strategy vs FedAvg over the same 12 blocks,
+two-sided, Holm-corrected over 6 comparisons; effect sizes = median difference and matched-pairs
+rank-biserial correlation (blocks sharing a partition are not fully independent).
 Rounding: 3 decimals; p-values keep 3 significant digits. Error bars: mean +/- std over seeds,
 clipped to [0, 1].
 """
@@ -29,7 +32,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import scikit_posthocs as sp  # noqa: E402
-from scipy.stats import friedmanchisquare  # noqa: E402
+from scipy.stats import friedmanchisquare, rankdata, wilcoxon  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_reduced import add_t95  # noqa: E402
@@ -243,6 +246,41 @@ def main() -> None:
         tab / "stats_mean_ranks.csv", index=False)
     nem.map(lambda v: float(f"{v:.3g}")).rename_axis("strategy").to_csv(tab / "stats_nemenyi_pvalues.csv")
     sig_pairs = [(a, b, nem.loc[a, b]) for a, b in combinations(STRATS, 2) if nem.loc[a, b] < 0.05]
+
+    # Planned pairwise tests: each strategy vs FedAvg, Wilcoxon signed-rank over the same 12
+    # blocks, two-sided, Holm correction over the 6 comparisons. Effect sizes: median difference
+    # (strategy - FedAvg) and matched-pairs rank-biserial r = (W+ - W-) / (W+ + W-), zeros dropped.
+    wrows = []
+    for s in [x for x in STRATS if x != "fedavg"]:
+        diff = (blocks[s] - blocks["fedavg"]).to_numpy()
+        nz = diff[diff != 0]
+        rk = rankdata(np.abs(nz))
+        w_pos, w_neg = rk[nz > 0].sum(), rk[nz < 0].sum()
+        test = wilcoxon(blocks[s], blocks["fedavg"], alternative="two-sided", zero_method="wilcox")
+        wrows.append({"strategy": s, "baseline": "fedavg", "n_blocks": len(diff), "n_nonzero": len(nz),
+                      "n_better": int((diff > 0).sum()), "n_worse": int((diff < 0).sum()),
+                      "median_diff": np.median(diff), "mean_diff": diff.mean(),
+                      "w_plus": w_pos, "w_minus": w_neg, "wilcoxon_statistic": float(test.statistic),
+                      "p_raw": float(test.pvalue),
+                      "rank_biserial_r": (w_pos - w_neg) / (w_pos + w_neg) if len(nz) else 0.0})
+    wt = pd.DataFrame(wrows)
+    order_p = np.argsort(wt.p_raw.to_numpy())           # Holm step-down
+    m = len(wt)
+    adj, running = np.empty(m), 0.0
+    for rank_i, idx in enumerate(order_p):
+        running = max(running, min(1.0, (m - rank_i) * wt.p_raw.iloc[idx]))
+        adj[idx] = running
+    wt["p_holm"] = adj
+    wt["significant_holm_0.05"] = wt.p_holm < 0.05
+    for c in ("median_diff", "mean_diff", "w_plus", "w_minus", "wilcoxon_statistic", "rank_biserial_r"):
+        wt[c] = wt[c].round(3)
+    for c in ("p_raw", "p_holm"):
+        wt[c] = wt[c].map(lambda v: float(f"{v:.3g}"))
+    wt["protocol"], wt["rounds"], wt["metric"] = "random", 100, "val-selected test macro-F1"
+    wt["blocks"] = "partition x seed (4 x 3)"
+    wt["note"] = ("blocks sharing a partition are not fully independent (same partition scheme, "
+                  "different seeds), so p-values are approximate; diff = strategy - fedavg")
+    wt.to_csv(tab / "stats_wilcoxon_vs_fedavg.csv", index=False)
 
     # CD diagram (Demsar style): rank axis, CD bar, cliques = maximal runs with all pairs p >= 0.05
     order = list(mean_ranks.index)
