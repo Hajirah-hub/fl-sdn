@@ -2,6 +2,7 @@
 
     python scripts/run_reduced.py                 # both protocols, 4 worker processes
     python scripts/run_reduced.py --dry           # 2 rounds, a few runs, results/dry/
+    python scripts/run_reduced.py --suite r100    # random protocol, R = 100, FedAvg/FedAdam -> results/r100/
     tail -f results/progress.log                  # live progress
 
 Protocols: chrono (primary; centralized + 84 federated + 24 poisoning) and random (secondary;
@@ -46,6 +47,12 @@ def protocol_configs(protocol: str, poisoning: bool) -> list[RunConfig]:
 
 def all_configs() -> list[RunConfig]:
     return protocol_configs("chrono", True) + protocol_configs("random", False)
+
+
+def r100_configs() -> list[RunConfig]:
+    """Follow-up: random protocol, R = 100, FedAvg + FedAdam, all four partitions, seeds 0-2."""
+    return [RunConfig(kind="fed", strategy=st, partition=p, seed=s, protocol="random", R=100)
+            for st in ("fedavg", "fedadam") for p in PARTITIONS for s in SEEDS]
 
 
 def dry_configs() -> list[RunConfig]:
@@ -100,16 +107,20 @@ def main() -> None:
     ap.add_argument("--dataset", default="insdn")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--suite", choices=["main", "r100"], default="main",
+                    help="r100: random protocol, R = 100, FedAvg/FedAdam -> results/r100/")
     args = ap.parse_args()
 
     data = Path(os.environ.get("FEDSDN_DATA", "./data"))
     results = Path(os.environ.get("FEDSDN_RESULTS", "./results"))
     if args.dry:
         results = results / "dry"
+    elif args.suite == "r100":
+        results = results / "r100"
     for proto in PROTOCOL_SUFFIX:
         (results / proto / "runs").mkdir(parents=True, exist_ok=True)
 
-    cfgs = dry_configs() if args.dry else all_configs()
+    cfgs = dry_configs() if args.dry else r100_configs() if args.suite == "r100" else all_configs()
     todo = [c for c in cfgs if not (results / c.protocol / "runs" / f"{c.run_id}.json").exists()]
     log = open(results / "progress.log", "a", buffering=1, encoding="utf-8")
 

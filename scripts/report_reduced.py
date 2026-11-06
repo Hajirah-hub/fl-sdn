@@ -184,6 +184,38 @@ def main() -> None:
     fig.savefig(figs / "rare_recall.png", dpi=150)
     plt.close(fig)
 
+    r100_dir = res / "r100" / "random"
+    if (r100_dir / "summary.csv").exists():
+        s100 = pd.read_csv(r100_dir / "summary.csv")
+        r100 = pd.read_csv(r100_dir / "rounds.csv")
+        thr = data["random"]["thr"]                     # same threshold as R = 30
+        s100["t95"], s100["t95_censored"] = 0, False
+        for i, rid in zip(s100.index, s100.run_id):
+            rr = r100[r100.run_id == rid].sort_values("round")
+            hit = rr[rr.macro_f1 >= thr]
+            s100.loc[i, "t95"] = int(hit["round"].iloc[0]) if len(hit) else int(rr["round"].max())
+            s100.loc[i, "t95_censored"] = hit.empty
+        s100["t95_censored"] = s100["t95_censored"].astype(bool)
+        s100[["run_id", "strategy", "partition", "seed", "t95", "t95_censored"]].to_csv(
+            rep / "t95_random_r100.csv", index=False)
+        c30 = data["random"]["clean"]
+        rows = []
+        for s in [x for x in STRATS if x in set(s100.strategy)]:
+            for p in PARTS:
+                a = c30[(c30.strategy == s) & (c30.partition == p)]
+                b = s100[(s100.strategy == s) & (s100.partition == p)]
+                rows.append({"strategy / partition": f"{s} {PSHORT[p]}",
+                             "R=30 val-sel F1": pm(a.sel_macro_f1),
+                             "R=100 val-sel F1": pm(b.sel_macro_f1),
+                             "R=100 sel. round": f"{b.sel_round.mean():.0f} ({b.sel_round.min()}–{b.sel_round.max()})",
+                             "R=30 T95": t95_cell(a), "R=100 T95": t95_cell(b)})
+        t = pd.DataFrame(rows).set_index("strategy / partition")
+        cen = data["random"]["central"].sel_macro_f1
+        out += ["## 8. Random protocol, R = 30 vs R = 100 (FedAvg, FedAdam)", "",
+                f"Same T95 threshold for both ({thr:.4f} = 0.95 × centralized val-selected "
+                f"{cen.mean():.4f}, centralized trained 30 epochs). Sel. round = val-selected round, "
+                "mean (min–max).", "", md(t), ""]
+
     out += ["Figures: report/figures/convergence_P4.png, report/figures/rare_recall.png", ""]
     text = "\n".join(out)
     (rep / "tables.md").write_text(text, encoding="utf-8")
