@@ -8,13 +8,34 @@ pipeline later; each dataset is an independent federation — never merge datase
 
 - Python **3.13** (Kaggle runs 3.13.18; local venv uses 3.13.17 because 3.13.18 has no Windows
   installer — same `cp313` ABI, same wheels). PyTorch **CPU** build. Flower in simulation mode.
-- Local: `.venv/` → `.venv\Scripts\activate` → `pip install -r requirements.txt`.
 - Exact versions: `requirements.txt` (direct pins) and `requirements-lock.txt` (full freeze).
   Never upgrade a pin casually — Flower's simulation API changes between releases.
-- **Ray / Flower simulation is Kaggle-only for now.** `flwr==1.43.0[simulation]` requires
-  `ray==2.55.1` except on Windows + Python 3.13, where no wheel exists, so the local venv has no Ray.
-  Keep strategy and client logic testable without Ray (call them in-process in tests).
-  After the first Kaggle install, save `pip freeze` as `requirements-lock-kaggle.txt`.
+- **Two local environments:**
+  - **Windows `.venv/`** (Python 3.13.17) is for **unit tests only**:
+    `.venv\Scripts\activate` → `pip install -r requirements.txt`. There is no Ray wheel for
+    Windows + Python 3.13, so `flwr[simulation]` installs without Ray and simulations cannot run there.
+    Keep strategy and client logic testable without Ray (call them in-process in tests).
+  - **WSL (Ubuntu 26.04, distro installed at `D:\WSL\Ubuntu`) `~/venvs/fedsdn`** (Python 3.13.18,
+    same as Kaggle) is for local Flower/Ray simulation runs. Keep free space on D: — the distro was
+    once corrupted by a full disk and had to be reinstalled. Full freeze:
+    `requirements-lock-wsl.txt`. The venv lives on the Linux filesystem because `/mnt/d` is slow
+    from WSL. The git-ignored symlink `.venv-wsl` in the repo points to it. Ubuntu 26.04 has no
+    `python3.13` apt package, so Python comes from uv:
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.local/bin/env
+    uv python install 3.13.18
+    uv venv --seed --python 3.13.18 ~/venvs/fedsdn
+    ln -sfn ~/venvs/fedsdn .venv-wsl        # run from the repo root
+    ~/venvs/fedsdn/bin/pip install -r requirements.txt "ray==2.55.1"
+    ~/venvs/fedsdn/bin/python scripts/smoke_flower.py   # 2 clients, 2 rounds, FedAvg
+    ~/venvs/fedsdn/bin/pip freeze > requirements-lock-wsl.txt
+    ```
+- **Simulation entry point: `flwr.simulation.run_simulation`** (Message API: `ClientApp` /
+  `ServerApp`, see `scripts/smoke_flower.py`). It is deprecated but works in the pinned
+  `flwr==1.43.0`; the deprecation warning at startup is expected. **Do not migrate to `flwr run`.**
+- After the first Kaggle install, save `pip freeze` as `requirements-lock-kaggle.txt`.
+- `.gitattributes` forces LF line endings, so editing from Windows and from WSL produces no
+  line-ending diffs.
 - Paths come from env vars, never hard-coded:
   - `FEDSDN_DATA` (default `./data`; Kaggle: `/kaggle/input/<dataset-slug>`)
   - `FEDSDN_RESULTS` (default `./results`; Kaggle: `/kaggle/working/results`)
@@ -123,6 +144,9 @@ Sidecar `.json`: scheme + parameters, K, seed, `flows_sha256` (hash of `flows.pa
 to start on mismatch), attempts used (≤100), whether rows were reassigned to meet `n_min = 100`,
 per-client class counts, mean pairwise JSD of label distributions, CV of shard sizes, (P3) family →
 client assignment. Partitions are built on `family` labels and reused unchanged for the binary task.
+Rows with `y_multi = -1` (the excluded Rare group) are treated as **one family of their own** during
+partitioning, so the same shards serve both tasks. In the multi-class task those rows stay in the
+shard and are masked out (see Training rules).
 
 ## Run config (YAML)
 
@@ -166,7 +190,14 @@ checkpoint_every: 1
 - Model: MLP d→128→64→C, ReLU, dropout 0.2 (logits + `CrossEntropyLoss`); 1D-CNN secondary.
 - **Plain mini-batch SGD, momentum = 0, no weight decay**, so local steps τ_k = E·⌈n_k/B⌉ are exact
   (FedNova needs this). Batch 256.
-- **Class-weighted cross-entropy** loss; no oversampling.
+- **Class-weighted cross-entropy** loss; no oversampling. Weights use **global** training counts:
+  each client reports its training-row class counts (validation rows excluded), the server sums
+  them, and `weight_c = n_train / (C · n_c)`, where `C` is the number of classes in the task.
+  Computed once per run, before round 1, and the same weights go to every client. The binary task
+  works the same way with `C = 2`. In the multi-class task, `n_train` and `n_c` count only rows with
+  `y_multi ≥ 0`.
+- **Rare rows (`y_multi = -1`)**: in the multi-class task they are masked out of the loss and out of
+  every metric. In the binary task they are ordinary attack rows.
 - FedProx term is added in client code; SCAFFOLD client control variates persist outside the
   ephemeral Flower client, keyed by `client_id`.
 - Unit tests: FedNova == FedAvg when all τ_k equal; SCAFFOLD == FedAvg with control variates frozen
@@ -182,8 +213,3 @@ checkpoint_every: 1
 - Writes are atomic (write temp file, then `os.replace`).
 - Test: a run interrupted and resumed must give results identical to an uninterrupted run.
 - Kaggle sessions are time-limited: drivers take a list of configs and rely on this to continue.
-
-## Open questions (decide before implementing)
-
-- Class weights: computed from global training counts (via server aggregation) or per-client local
-  counts? Not specified in the paper.
