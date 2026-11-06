@@ -65,3 +65,35 @@ def trimmed_mean(updates: torch.Tensor, f: int) -> torch.Tensor:
     if K - 2 * f < 1:
         raise ValueError("trimmed mean needs K > 2f")
     return updates.sort(dim=0).values[f:K - f].mean(0)
+
+
+class Scaffold:
+    """Karimireddy et al. 2020, option II, global step size 1, full participation.
+
+    Server variate c and per-client variates c_k (kept here across rounds, keyed by client id).
+    Client k trains with gradient + (c - c_k) (see `correction`); after tau_k plain-SGD steps at
+    rate lr: c_k+ = c_k - c - Delta_k / (tau_k * lr). The server applies the n_k-weighted mean of
+    Delta_k (as FedAvg) and c += sum_k p_k (c_k+ - c_k), so c = sum_k p_k c_k at all times.
+    With `freeze=True` the variates stay zero and the rule is exactly FedAvg.
+    """
+
+    def __init__(self, K: int, P: int, freeze: bool = False, dtype=torch.float32):
+        self.freeze = freeze
+        self.c = torch.zeros(P, dtype=dtype)
+        self.c_k = {k: torch.zeros(P, dtype=dtype) for k in range(K)}
+
+    def correction(self, k: int) -> torch.Tensor:
+        return self.c - self.c_k[k]
+
+    def step(self, updates: torch.Tensor, n: torch.Tensor, tau: torch.Tensor, lr: float,
+             ids: list[int]) -> torch.Tensor:
+        delta = fedavg(updates, n)
+        if not self.freeze:
+            p = (n.double() / n.double().sum()).to(updates.dtype)
+            dc = []
+            for i, k in enumerate(ids):
+                new = self.c_k[k] - self.c - updates[i] / (float(tau[i]) * lr)
+                dc.append(new - self.c_k[k])
+                self.c_k[k] = new
+            self.c = self.c + (p[:, None] * torch.stack(dc)).sum(0)
+        return delta
