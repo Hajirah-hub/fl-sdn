@@ -1,22 +1,28 @@
-"""Paper statistics, figures and tables from the FINAL results (never results/dry).
+"""Paper statistics, figures and tables from the FINAL v2 results (never results/dry*).
 
     python scripts/paper_outputs.py
 
-Inputs ($FEDSDN_RESULTS): chrono/ (R = 30, incl. poisoning), r100/random/ (random protocol, R = 100),
-random/ (random protocol, R = 30: R = 30 vs 100 comparison and the leakage diagnostic), and the
-partition sidecars in $FEDSDN_DATA/partitions/. Outputs: results/paper_tables/*.csv,
+Inputs ($FEDSDN_RESULTS, written by scripts/run_study.py): tuning/, random/ (R = 100),
+chrono/ (R = 30, incl. poisoning on P4), sweep/ (R = 100, FedAvg / FedAdam on P1 a0.1/1/10 and
+P2 b0.5), local/ (local-only baseline), poison_random/ (random P3 m1, R = 100), plus the
+partition sidecars in $FEDSDN_DATA/partitions/. Outputs: results/paper_tables/*.csv and
 results/paper_figures/*.png (300 dpi, IEEE single column 3.5 in unless noted, fonts >= 8 pt,
-Okabe-Ito colorblind-safe palette, fixed color per strategy, no titles).
+Okabe-Ito palette with a fixed color per strategy, SCAFFOLD grey, centralized black, no titles).
 
-Leakage diagnostic (fig1, table_leakage_diagnostic): centralized baseline, 30 epochs on both
-protocols (same training budget), seeds 0-2, val-selected epoch.
-Statistics: Friedman test over the 7 strategies on val-selected test macro-F1 of the random
-protocol at R = 100, blocks = partition x seed (12); Nemenyi post-hoc; alpha = 0.05. Planned
-pairwise tests: Wilcoxon signed-rank of each strategy vs FedAvg over the same 12 blocks,
-two-sided, Holm-corrected over 6 comparisons; effect sizes = median difference and matched-pairs
-rank-biserial correlation (blocks sharing a partition are not fully independent).
-Rounding: 3 decimals; p-values keep 3 significant digits. Error bars: mean +/- std over seeds,
-clipped to [0, 1].
+Derived without extra runs: a round never depends on R, so an R = 30 run is exactly the first
+30 rounds of the R = 100 run with the same seed. The R = 30 vs R = 100 table and the equal-budget
+leakage diagnostic (centralized, 30 epochs on both protocols) truncate the R = 100 rounds and
+re-select the round by validation macro-F1 (ties -> earliest).
+
+Statistics (random protocol, R = 100, val-selected test macro-F1, blocks = partition x seed =
+4 x 5 = 20, 8 strategies): Friedman + Nemenyi (alpha 0.05); Wilcoxon signed-rank of each
+strategy vs FedAvg, two-sided, Holm over 7 comparisons, effect sizes median difference and
+matched-pairs rank-biserial r; bootstrap 95% CIs of the mean difference to FedAvg, stratified by
+partition (seeds resampled within each partition, 10,000 resamples, percentile, rng 0); OLS per
+strategy of the gap to centralized (centralized val-selected F1 of the same seed minus the run's)
+on the partition's realized mean pairwise JSD and shard-size CV, using the main grid plus the
+alpha sweep for FedAvg / FedAdam. Blocks sharing a partition are not fully independent, so
+p-values are approximate. Rounding: 3 decimals; p-values 3 significant digits.
 """
 
 import json
@@ -32,25 +38,33 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import scikit_posthocs as sp  # noqa: E402
+import statsmodels.api as sm  # noqa: E402
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_reduced import add_t95  # noqa: E402
 
-STRATS = ["fedavg", "fedprox", "fednova", "fedadam", "krum", "median", "trimmed_mean"]
+STRATS = ["fedavg", "fedprox", "fednova", "fedadam", "scaffold", "krum", "median", "trimmed_mean"]
 LABEL = {"fedavg": "FedAvg", "fedprox": "FedProx", "fednova": "FedNova", "fedadam": "FedAdam",
-         "krum": "Krum", "median": "Median", "trimmed_mean": "Trimmed mean"}
-# Okabe-Ito palette, one fixed color per strategy; centralized = black
+         "scaffold": "SCAFFOLD", "krum": "Krum", "median": "Median", "trimmed_mean": "Trimmed mean",
+         "central": "Centralized"}
+# Okabe-Ito palette, one fixed color per strategy; SCAFFOLD grey; centralized = black
 COLOR = {"fedavg": "#0072B2", "fedprox": "#56B4E9", "fednova": "#009E73", "fedadam": "#D55E00",
-         "krum": "#CC79A7", "median": "#E69F00", "trimmed_mean": "#F0E442"}
-LSTYLE = {"fedavg": "-", "fedprox": "--", "fednova": "-", "fedadam": "-", "krum": "-.",
-          "median": "-", "trimmed_mean": ":"}
+         "scaffold": "#999999", "krum": "#CC79A7", "median": "#E69F00", "trimmed_mean": "#F0E442",
+         "central": "#000000"}
+LSTYLE = {"fedavg": "-", "fedprox": "--", "fednova": "-", "fedadam": "-", "scaffold": (0, (5, 1.5)),
+          "krum": "-.", "median": "-", "trimmed_mean": ":", "central": "--"}
 PARTS = ["P0", "P1_a0.5", "P3_m1", "P4_a0.5b0.5"]
-PLABEL = {"P0": "P0 (IID)", "P1_a0.5": "P1 (α=0.5)", "P3_m1": "P3 (m=1)", "P4_a0.5b0.5": "P4 (α=β=0.5)"}
+SWEEP = ["P1_a0.1", "P1_a1", "P1_a10", "P2_b0.5"]
+PLABEL = {"P0": "P0 (IID)", "P1_a0.5": "P1 (α=0.5)", "P3_m1": "P3 (m=1)", "P4_a0.5b0.5": "P4 (α=β=0.5)",
+          "P1_a0.1": "P1 (α=0.1)", "P1_a1": "P1 (α=1)", "P1_a10": "P1 (α=10)", "P2_b0.5": "P2 (β=0.5)"}
 CLASSES = ["Normal", "BFA", "DDoS", "DoS", "Probe"]
-P4 = "P4_a0.5b0.5"
+P4, P3 = "P4_a0.5b0.5", "P3_m1"
+POISON = ["fedavg", "krum", "median", "trimmed_mean"]
+SEEDS = [0, 1, 2, 3, 4]
 SINGLE, DOUBLE = 3.5, 7.16
-Q05_K7 = 2.949            # Nemenyi critical value q_0.05 for k = 7 (Demsar 2006, Table 5)
+Q05_K8 = 3.031            # Nemenyi critical value q_0.05 for k = 8 (Demsar 2006, Table 5)
+N_BOOT = 10_000
 
 
 def style() -> None:
@@ -66,18 +80,25 @@ def r3(df: pd.DataFrame) -> pd.DataFrame:
     return df.round(3)
 
 
+def p3s(v: float) -> float:
+    return float(f"{v:.3g}")
+
+
 def load(d: Path) -> dict:
     s = pd.read_csv(d / "summary.csv")
     r = pd.read_csv(d / "rounds.csv")
     central = s[s.kind == "central"]
-    thr = 0.95 * central["sel_macro_f1"].mean()
-    clean = add_t95(s[(s.kind == "fed") & (s.attack == "none")], r, thr)
+    thr = 0.95 * central["sel_macro_f1"].mean() if len(central) else np.nan
+    fed = s[s.kind == "fed"]
+    clean = fed[fed.attack == "none"]
+    if len(central):
+        clean = add_t95(clean, r, thr)
     return {"summary": s, "rounds": r, "central": central, "clean": clean, "thr": thr,
-            "R": int(s["R"].max()), "poison": s[(s.kind == "fed") & (s.attack != "none")]}
+            "R": int(s["R"].max()), "poison": fed[fed.attack != "none"]}
 
 
 def ms(x: pd.Series) -> tuple[float, float]:
-    x = x.dropna()
+    x = pd.Series(x).dropna()
     return float(x.mean()), float(x.std(ddof=1)) if len(x) > 1 else 0.0
 
 
@@ -92,6 +113,28 @@ def save(fig, path: Path) -> None:
     plt.close(fig)
 
 
+def truncate_select(rounds: pd.DataFrame, run_ids, R: int) -> pd.DataFrame:
+    """Per run: the round <= R with the best validation macro-F1 (ties -> earliest)."""
+    out = []
+    for rid in run_ids:
+        rr = rounds[(rounds.run_id == rid) & (rounds["round"] <= R)].sort_values("round")
+        out.append(rr.iloc[int(np.argmax(rr["val_macro_f1"].to_numpy()))])
+    return pd.DataFrame(out).reset_index(drop=True)
+
+
+def sidecar(data_dir: Path, proto_dir: str, part: str, seed: int) -> dict:
+    return json.loads((data_dir / "partitions" / proto_dir / f"{part}_K8_s{seed}.json").read_text())
+
+
+def holm(p: np.ndarray) -> np.ndarray:
+    order, m = np.argsort(p), len(p)
+    adj, running = np.empty(m), 0.0
+    for i, idx in enumerate(order):
+        running = max(running, min(1.0, (m - i) * p[idx]))
+        adj[idx] = running
+    return adj
+
+
 def main() -> None:
     res = Path(os.environ.get("FEDSDN_RESULTS", "./results"))
     data_dir = Path(os.environ.get("FEDSDN_DATA", "./data"))
@@ -100,158 +143,209 @@ def main() -> None:
     figd.mkdir(parents=True, exist_ok=True)
     style()
 
-    chrono = load(res / "chrono")
-    rnd = load(res / "r100" / "random")
-    rnd30 = load(res / "random")
-    assert chrono["R"] == 30 and rnd["R"] == 100 and rnd30["R"] == 30
-    protos = {"chronological": chrono, "random": rnd}
+    rnd, chrono = load(res / "random"), load(res / "chrono")
+    sweep, prand = load(res / "sweep"), load(res / "poison_random")
+    local = pd.read_csv(res / "local" / "summary.csv")
+    tun_trials = pd.read_csv(res / "tuning" / "trials.csv")
+    tun_chosen = pd.read_csv(res / "tuning" / "tuning_summary.csv")
+    assert rnd["R"] == 100 and chrono["R"] == 30 and sweep["R"] == 100
+    assert len(rnd["clean"]) == len(STRATS) * len(PARTS) * len(SEEDS) == len(chrono["clean"])
+    protos = {"random": rnd, "chronological": chrono}
+    c_rnd = rnd["central"].set_index("seed")["sel_macro_f1"]
 
-    # ---------------------------------------------------------------- C. tables
+    def cell(d, s, p):
+        c = d["clean"]
+        return c[(c.strategy == s) & (c.partition == p)]
+
+    # ---------------------------------------------------------------- tables: main grid
     rows = []
     for pname, d in protos.items():
         for s in STRATS:
             for p in PARTS:
-                g = d["clean"][(d["clean"].strategy == s) & (d["clean"].partition == p)]
-                m, sd = ms(g.sel_macro_f1)
+                m, sd = ms(cell(d, s, p).sel_macro_f1)
                 rows.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
-                             "macro_f1_mean": m, "macro_f1_std": sd, "n_seeds": len(g)})
+                             "macro_f1_mean": m, "macro_f1_std": sd, "n_seeds": len(cell(d, s, p))})
         m, sd = ms(d["central"].sel_macro_f1)
         rows.append({"protocol": pname, "rounds": d["R"], "strategy": "centralized", "partition": "all",
                      "macro_f1_mean": m, "macro_f1_std": sd, "n_seeds": len(d["central"])})
     t_head = pd.DataFrame(rows)
     r3(t_head).to_csv(tab / "table_valselected_macro_f1.csv", index=False)
 
-    rows = []
+    def grp(d, s, p):
+        return d["central"] if s == "centralized" else cell(d, s, p)
+
+    rows, rows_cls, rows_worst, rows_t95 = [], [], [], []
     for pname, d in protos.items():
         for s in STRATS + ["centralized"]:
             for p in (PARTS if s != "centralized" else ["all"]):
-                g = d["central"] if s == "centralized" else d["clean"][(d["clean"].strategy == s) & (d["clean"].partition == p)]
+                g = grp(d, s, p)
                 fm, fs = ms(g.final_macro_f1)
                 am, as_ = ms(g.auc_macro_f1)
-                sm, ss = ms(g.sel_round)
+                sm_, ss = ms(g.sel_round)
                 rows.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
                              "final_macro_f1_mean": fm, "final_macro_f1_std": fs,
                              "auc_macro_f1_mean": am, "auc_macro_f1_std": as_,
-                             "selected_round_mean": sm, "selected_round_std": ss})
-    r3(pd.DataFrame(rows)).to_csv(tab / "table_final_auc_macro_f1.csv", index=False)
-
-    rows = []
-    for pname, d in protos.items():
-        for s in STRATS + ["centralized"]:
-            for p in (PARTS if s != "centralized" else ["all"]):
-                g = d["central"] if s == "centralized" else d["clean"][(d["clean"].strategy == s) & (d["clean"].partition == p)]
+                             "selected_round_mean": sm_, "selected_round_std": ss})
                 for c in CLASSES:
                     m, sd = ms(g[f"sel_recall_{c}"])
-                    rows.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
-                                 "class": c, "recall_mean": m, "recall_std": sd})
-    r3(pd.DataFrame(rows)).to_csv(tab / "table_per_class_recall.csv", index=False)
-
-    rows = []
-    for pname, d in protos.items():
-        for s in STRATS:
-            for p in PARTS:
-                g = d["clean"][(d["clean"].strategy == s) & (d["clean"].partition == p)]
+                    rows_cls.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
+                                     "class": c, "recall_mean": m, "recall_std": sd})
+                if s == "centralized":
+                    continue
                 m, sd = ms(g.sel_worst_client_val_f1)
-                rows.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
-                             "worst_client_val_macro_f1_mean": m, "worst_client_val_macro_f1_std": sd})
-    r3(pd.DataFrame(rows)).to_csv(tab / "table_worst_client_val_f1.csv", index=False)
-
-    rows = []
-    for pname, d in protos.items():
-        for s in STRATS:
-            for p in PARTS:
-                g = d["clean"][(d["clean"].strategy == s) & (d["clean"].partition == p)]
+                rows_worst.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
+                                   "worst_client_val_macro_f1_mean": m, "worst_client_val_macro_f1_std": sd})
                 hit = g[~g.t95_censored]
                 bpr = int(g.bytes_per_round.iloc[0])
-                rows.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
-                             "t95_threshold": d["thr"], "n_reached": len(hit), "n_censored": int(g.t95_censored.sum()),
-                             "t95_rounds_mean_reached": hit.t95.mean() if len(hit) else np.nan,
-                             "t95_rounds_std_reached": hit.t95.std(ddof=1) if len(hit) > 1 else (0.0 if len(hit) else np.nan),
-                             "mb_to_t95_mean_reached": hit.t95.mean() * bpr / 1e6 if len(hit) else np.nan,
-                             "bytes_per_round": bpr, "mb_per_round": bpr / 1e6})
-    r3(pd.DataFrame(rows)).to_csv(tab / "table_t95_bytes.csv", index=False)
+                rows_t95.append({"protocol": pname, "rounds": d["R"], "strategy": s, "partition": p,
+                                 "t95_threshold": d["thr"], "n_reached": len(hit),
+                                 "n_censored": int(g.t95_censored.sum()),
+                                 "t95_rounds_mean_reached": hit.t95.mean() if len(hit) else np.nan,
+                                 "t95_rounds_std_reached": hit.t95.std(ddof=1) if len(hit) > 1 else (0.0 if len(hit) else np.nan),
+                                 "mb_to_t95_mean_reached": hit.t95.mean() * bpr / 1e6 if len(hit) else np.nan,
+                                 "bytes_per_round": bpr, "mb_per_round": bpr / 1e6})
+    r3(pd.DataFrame(rows)).to_csv(tab / "table_final_auc_macro_f1.csv", index=False)
+    r3(pd.DataFrame(rows_cls)).to_csv(tab / "table_per_class_recall.csv", index=False)
+    r3(pd.DataFrame(rows_worst)).to_csv(tab / "table_worst_client_val_f1.csv", index=False)
+    r3(pd.DataFrame(rows_t95)).to_csv(tab / "table_t95_bytes.csv", index=False)
 
-    rows = []
-    for s in ["fedavg", "krum", "median", "trimmed_mean"]:
-        conds = {"clean": chrono["clean"][(chrono["clean"].strategy == s) & (chrono["clean"].partition == P4)]}
-        for a in ("sign_flip", "targeted"):
-            conds[a] = chrono["poison"][(chrono["poison"].strategy == s) & (chrono["poison"].attack == a)]
-        for a, g in conds.items():
-            fm, fs = ms(g.sel_macro_f1)
-            nm, ns = ms(g.sel_attack_fnr)
-            rows.append({"protocol": "chronological", "rounds": 30, "partition": P4, "strategy": s,
-                         "attack": a, "malicious_clients": 0 if a == "clean" else 2,
-                         "macro_f1_mean": fm, "macro_f1_std": fs, "attack_fnr_mean": nm, "attack_fnr_std": ns})
-    t_poison = pd.DataFrame(rows)
-    r3(t_poison).to_csv(tab / "table_poisoning.csv", index=False)
+    # ---------------------------------------------------------------- poisoning
+    def poison_table(d, part, pname):
+        out = []
+        for s in POISON:
+            conds = {"clean": cell(d, s, part) if d is not prand else cell(rnd, s, part)}
+            for a in ("sign_flip", "targeted"):
+                conds[a] = d["poison"][(d["poison"].strategy == s) & (d["poison"].attack == a)]
+            for a, g in conds.items():
+                fm, fs = ms(g.sel_macro_f1)
+                nm, ns = ms(g.sel_attack_fnr)
+                row = {"protocol": pname, "rounds": d["R"], "partition": part, "strategy": s, "attack": a,
+                       "malicious_clients": 0 if a == "clean" else 2, "n_seeds": len(g),
+                       "macro_f1_mean": fm, "macro_f1_std": fs, "attack_fnr_mean": nm, "attack_fnr_std": ns}
+                if a != "clean" and "malicious_sole_holder" in g:
+                    sole = g.malicious_sole_holder.astype(bool)
+                    row["n_runs_malicious_sole_holder"] = int(sole.sum())
+                    row["sole_holder_families"] = "; ".join(
+                        f"s{r.seed}:{r.sole_holder_families}" for r in g[sole].sort_values("seed").itertuples())
+                    row["macro_f1_mean_sole_holder"] = g[sole].sel_macro_f1.mean() if sole.any() else np.nan
+                    row["macro_f1_mean_not_sole_holder"] = g[~sole].sel_macro_f1.mean() if (~sole).any() else np.nan
+                out.append(row)
+        return pd.DataFrame(out)
 
-    c30 = add_t95(rnd30["clean"], rnd30["rounds"], rnd["thr"])
+    t_poison = poison_table(chrono, P4, "chronological")
+    r3(t_poison.drop(columns=[c for c in t_poison if "sole" in c])).to_csv(tab / "table_poisoning.csv", index=False)
+    t_poison_r = poison_table(prand, P3, "random")
+    r3(t_poison_r).to_csv(tab / "table_poisoning_random_P3.csv", index=False)
+
+    # ---------------------------------------------------------------- R = 30 vs 100, leakage
     rows = []
+    thr_r30 = 0.95 * truncate_select(rnd["rounds"], rnd["central"].run_id, 30)["macro_f1"].mean()
     for s in STRATS:
         for p in PARTS:
-            a = c30[(c30.strategy == s) & (c30.partition == p)]
-            b = rnd["clean"][(rnd["clean"].strategy == s) & (rnd["clean"].partition == p)]
-            am, as_ = ms(a.sel_macro_f1)
+            b = cell(rnd, s, p)
+            a = truncate_select(rnd["rounds"], b.run_id, 30)
+            am, as_ = ms(a.macro_f1)
             bm, bs = ms(b.sel_macro_f1)
+            rr = rnd["rounds"][rnd["rounds"].run_id.isin(b.run_id) & (rnd["rounds"]["round"] <= 30)]
+            r30_hit = rr[rr.macro_f1 >= rnd["thr"]].run_id.nunique()
             rows.append({"protocol": "random", "strategy": s, "partition": p,
                          "r30_macro_f1_mean": am, "r30_macro_f1_std": as_,
                          "r100_macro_f1_mean": bm, "r100_macro_f1_std": bs,
+                         "r30_selected_round_mean": a["round"].mean(),
                          "r100_selected_round_mean": b.sel_round.mean(),
                          "r100_selected_round_min": b.sel_round.min(), "r100_selected_round_max": b.sel_round.max(),
-                         "t95_threshold": rnd["thr"],
-                         "r30_t95_n_reached": int((~a.t95_censored).sum()),
-                         "r100_t95_n_reached": int((~b.t95_censored).sum()),
-                         "r100_t95_rounds_mean_reached": b[~b.t95_censored].t95.mean() if (~b.t95_censored).any() else np.nan})
+                         "t95_threshold_r100": rnd["thr"], "t95_threshold_central_30_epochs": thr_r30,
+                         "r30_t95_n_reached": r30_hit, "r100_t95_n_reached": int((~b.t95_censored).sum())})
     r3(pd.DataFrame(rows)).to_csv(tab / "table_random_r30_vs_r100.csv", index=False)
 
     rows = []
-    for pname, d in (("chronological", chrono), ("random", rnd30)):
-        g = d["central"]
+    for pname, g in (("chronological", chrono["central"].rename(columns=lambda c: c[4:] if c.startswith("sel_") else c)),
+                     ("random", truncate_select(rnd["rounds"], rnd["central"].run_id, 30))):
         row = {"protocol": pname, "epochs": 30, "n_seeds": len(g)}
-        row["macro_f1_mean"], row["macro_f1_std"] = ms(g.sel_macro_f1)
+        row["macro_f1_mean"], row["macro_f1_std"] = ms(g.macro_f1)
         for c in CLASSES:
-            row[f"recall_{c}_mean"], row[f"recall_{c}_std"] = ms(g[f"sel_recall_{c}"])
+            row[f"recall_{c}_mean"], row[f"recall_{c}_std"] = ms(g[f"recall_{c}"])
         rows.append(row)
     t_leak = pd.DataFrame(rows)
     r3(t_leak).to_csv(tab / "table_leakage_diagnostic.csv", index=False)
 
+    # ---------------------------------------------------------------- heterogeneity
     rows = []
-    for pdir, pname in (("insdn", "chronological"), ("insdn_random", "random")):
-        for p in PARTS:
-            for seed in (0, 1, 2):
-                sc = json.loads((data_dir / "partitions" / pdir / f"{p}_K8_s{seed}.json").read_text())
+    for pdir, pname, parts, seeds in (("insdn", "chronological", PARTS, SEEDS),
+                                      ("insdn_random", "random", PARTS + SWEEP, SEEDS),
+                                      ("insdn_random", "random (tuning)", ["P1_a0.5", P3, P4], [99])):
+        for p in parts:
+            for seed in seeds:
+                sc = sidecar(data_dir, pdir, p, seed)
                 rows.append({"protocol": pname, "partition": p, "seed": seed, "K": sc["K"],
                              "mean_pairwise_jsd": sc["mean_pairwise_jsd"], "shard_size_cv": sc["shard_size_cv"],
                              "min_shard": sc["min_shard"], "max_shard": sc["max_shard"],
                              "attempts": sc["attempts"], "rows_moved": sc["rows_moved"]})
-    r3(pd.DataFrame(rows)).to_csv(tab / "table_partition_heterogeneity.csv", index=False)
+    het = pd.DataFrame(rows)
+    r3(het).to_csv(tab / "table_partition_heterogeneity.csv", index=False)
+    het_r = het[het.protocol == "random"].set_index(["partition", "seed"])
 
-    # ---------------------------------------------------------------- A. statistics
+    # ---------------------------------------------------------------- tuning
+    tt = tun_trials.copy()
+    tt["label"] = tt.strategy.map(LABEL)
+    r3(tt).to_csv(tab / "table_tuning_trials.csv", index=False)
+    r3(tun_chosen).to_csv(tab / "table_tuning_chosen.csv", index=False)
+
+    # ---------------------------------------------------------------- alpha sweep
+    rows = []
+    for s in ("fedavg", "fedadam"):
+        for p in ["P1_a0.1", "P1_a0.5", "P1_a1", "P1_a10", "P0", "P2_b0.5"]:
+            g = cell(sweep if p in SWEEP else rnd, s, p)
+            m, sd = ms(g.sel_macro_f1)
+            fm, fs = ms(g.final_macro_f1)
+            h = het_r.loc[p]
+            rows.append({"protocol": "random", "rounds": 100, "strategy": s, "partition": p,
+                         "mean_jsd": h.mean_pairwise_jsd.mean(), "mean_cv": h.shard_size_cv.mean(),
+                         "macro_f1_mean": m, "macro_f1_std": sd, "final_macro_f1_mean": fm,
+                         "final_macro_f1_std": fs, "n_seeds": len(g)})
+    t_sweep = pd.DataFrame(rows)
+    r3(t_sweep).to_csv(tab / "table_alpha_sweep.csv", index=False)
+
+    # ---------------------------------------------------------------- local-only
+    rows = []
+    for p in PARTS:
+        g = local[local.partition == p]
+        row = {"protocol": "random", "epochs": 100, "partition": p, "n_seeds": len(g)}
+        for col, name in (("sel_macro_f1", "local_mean_client"), ("sel_worst_macro_f1", "local_worst_client"),
+                          ("sel_best_macro_f1", "local_best_client")):
+            row[f"{name}_mean"], row[f"{name}_std"] = ms(g[col])
+        row["classes_per_client_mean"] = np.mean([np.mean(list(map(int, x.split()))) for x in g.client_n_classes])
+        for s in ("fedavg", "fedadam"):
+            row[f"{s}_mean"], row[f"{s}_std"] = ms(cell(rnd, s, p).sel_macro_f1)
+        row["centralized_mean"], row["centralized_std"] = ms(rnd["central"].sel_macro_f1)
+        rows.append(row)
+    t_local = pd.DataFrame(rows)
+    r3(t_local).to_csv(tab / "table_local_only.csv", index=False)
+
+    # ---------------------------------------------------------------- statistics
     cl = rnd["clean"]
     blocks = cl.pivot_table(index=["partition", "seed"], columns="strategy", values="sel_macro_f1")[STRATS]
-    assert blocks.shape == (12, 7) and not blocks.isna().any().any()
+    assert blocks.shape == (20, 8) and not blocks.isna().any().any()
     stat, pval = friedmanchisquare(*[blocks[s].to_numpy() for s in STRATS])
     ranks = blocks.rank(axis=1, ascending=False)          # rank 1 = highest macro-F1
     mean_ranks = ranks.mean().sort_values()
     k, n = len(STRATS), len(blocks)
-    cd = Q05_K7 * np.sqrt(k * (k + 1) / (6 * n))
+    cd = Q05_K8 * np.sqrt(k * (k + 1) / (6 * n))
     nem = sp.posthoc_nemenyi_friedman(blocks.to_numpy())
     nem.index = nem.columns = STRATS
     pd.DataFrame([{"test": "Friedman", "protocol": "random", "rounds": 100, "metric": "val-selected test macro-F1",
-                   "k_strategies": k, "n_blocks": n, "blocks": "partition x seed",
-                   "chi2_statistic": round(stat, 3), "p_value": float(f"{pval:.3g}"),
+                   "k_strategies": k, "n_blocks": n, "blocks": "partition x seed (4 x 5)",
+                   "chi2_statistic": round(stat, 3), "p_value": p3s(pval),
                    "nemenyi_cd_alpha_0.05": round(cd, 3)}]).to_csv(tab / "stats_friedman.csv", index=False)
     pd.DataFrame({"strategy": mean_ranks.index, "mean_rank": mean_ranks.values.round(3),
                   "mean_macro_f1": blocks[mean_ranks.index].mean().values.round(3)}).to_csv(
         tab / "stats_mean_ranks.csv", index=False)
-    nem.map(lambda v: float(f"{v:.3g}")).rename_axis("strategy").to_csv(tab / "stats_nemenyi_pvalues.csv")
+    nem.map(p3s).rename_axis("strategy").to_csv(tab / "stats_nemenyi_pvalues.csv")
     sig_pairs = [(a, b, nem.loc[a, b]) for a, b in combinations(STRATS, 2) if nem.loc[a, b] < 0.05]
 
-    # Planned pairwise tests: each strategy vs FedAvg, Wilcoxon signed-rank over the same 12
-    # blocks, two-sided, Holm correction over the 6 comparisons. Effect sizes: median difference
-    # (strategy - FedAvg) and matched-pairs rank-biserial r = (W+ - W-) / (W+ + W-), zeros dropped.
+    others = [x for x in STRATS if x != "fedavg"]
     wrows = []
-    for s in [x for x in STRATS if x != "fedavg"]:
+    for s in others:
         diff = (blocks[s] - blocks["fedavg"]).to_numpy()
         nz = diff[diff != 0]
         rk = rankdata(np.abs(nz))
@@ -264,61 +358,58 @@ def main() -> None:
                       "p_raw": float(test.pvalue),
                       "rank_biserial_r": (w_pos - w_neg) / (w_pos + w_neg) if len(nz) else 0.0})
     wt = pd.DataFrame(wrows)
-    order_p = np.argsort(wt.p_raw.to_numpy())           # Holm step-down
-    m = len(wt)
-    adj, running = np.empty(m), 0.0
-    for rank_i, idx in enumerate(order_p):
-        running = max(running, min(1.0, (m - rank_i) * wt.p_raw.iloc[idx]))
-        adj[idx] = running
-    wt["p_holm"] = adj
+    wt["p_holm"] = holm(wt.p_raw.to_numpy())
     wt["significant_holm_0.05"] = wt.p_holm < 0.05
     for c in ("median_diff", "mean_diff", "w_plus", "w_minus", "wilcoxon_statistic", "rank_biserial_r"):
         wt[c] = wt[c].round(3)
     for c in ("p_raw", "p_holm"):
-        wt[c] = wt[c].map(lambda v: float(f"{v:.3g}"))
+        wt[c] = wt[c].map(p3s)
     wt["protocol"], wt["rounds"], wt["metric"] = "random", 100, "val-selected test macro-F1"
-    wt["blocks"] = "partition x seed (4 x 3)"
+    wt["blocks"] = "partition x seed (4 x 5)"
     wt["note"] = ("blocks sharing a partition are not fully independent (same partition scheme, "
                   "different seeds), so p-values are approximate; diff = strategy - fedavg")
     wt.to_csv(tab / "stats_wilcoxon_vs_fedavg.csv", index=False)
 
-    # CD diagram (Demsar style): rank axis, CD bar, cliques = maximal runs with all pairs p >= 0.05
-    order = list(mean_ranks.index)
-    cliques = []
-    for i in range(k):
-        j = i
-        while j + 1 < k and all(nem.loc[order[a], order[b]] >= 0.05 for a in range(i, j + 2) for b in range(i, j + 2) if a < b):
-            j += 1
-        if j > i and not any(c0 <= i and j <= c1 for c0, c1 in cliques):
-            cliques.append((i, j))
-    fig, ax = plt.subplots(figsize=(SINGLE, 1.75))
-    lo, hi = 1, k
-    ax.set_xlim(lo - 0.3, hi + 0.3)
-    ax.set_ylim(0.2, 1.08)
-    ax.axis("off")
-    y_axis = 0.74
-    ax.plot([lo, hi], [y_axis, y_axis], color="k", lw=0.8)
-    for t in range(lo, hi + 1):
-        ax.plot([t, t], [y_axis, y_axis + 0.03], color="k", lw=0.8)
-        ax.text(t, y_axis + 0.05, str(t), ha="center", va="bottom")
-    ax.plot([lo, lo + cd], [0.96, 0.96], color="k", lw=1.2)
-    for xx in (lo, lo + cd):
-        ax.plot([xx, xx], [0.94, 0.98], color="k", lw=1.0)
-    ax.text(lo + cd + 0.1, 0.96, f"CD = {cd:.2f}", ha="left", va="center")
-    half = (k + 1) // 2
-    for idx, s in enumerate(order):
-        r = mean_ranks[s]
-        left = idx < half
-        y = y_axis - 0.16 - 0.12 * (idx if left else (k - 1 - idx))
-        xt = lo - 0.25 if left else hi + 0.25
-        ax.plot([r, r, xt], [y_axis, y, y], color=COLOR[s] if s != "trimmed_mean" else "#B8A800", lw=0.9)
-        ax.text(xt + (-0.05 if left else 0.05), y, f"{LABEL[s]} ({r:.2f})", ha="right" if left else "left", va="center")
-    for ci, (i, j) in enumerate(cliques):
-        yy = y_axis - 0.04 - 0.035 * ci
-        ax.plot([mean_ranks[order[i]] - 0.05, mean_ranks[order[j]] + 0.05], [yy, yy], color="k", lw=2.2)
-    save(fig, figd / "fig6_cd_diagram.png")
+    rng = np.random.default_rng(0)
+    D = {s: (blocks[s] - blocks["fedavg"]).unstack("seed").loc[PARTS].to_numpy() for s in others}  # 4 x 5
+    idx = rng.integers(0, len(SEEDS), size=(N_BOOT, len(PARTS), len(SEEDS)))
+    brows = []
+    for s in others:
+        d = D[s]
+        boot = np.take_along_axis(np.broadcast_to(d, (N_BOOT, *d.shape)), idx, axis=2).mean(axis=(1, 2))
+        lo, hi = np.percentile(boot, [2.5, 97.5])
+        brows.append({"strategy": s, "baseline": "fedavg", "mean_diff": d.mean(), "ci95_low": lo, "ci95_high": hi,
+                      "ci_excludes_zero": bool(lo > 0 or hi < 0), "n_boot": N_BOOT,
+                      "resampling": "seeds within partition (stratified), percentile"})
+    bt = pd.DataFrame(brows)
+    r3(bt).to_csv(tab / "stats_bootstrap_ci_vs_fedavg.csv", index=False)
 
-    # ---------------------------------------------------------------- B. figures
+    # regression of the gap to centralized on realized JSD and CV
+    reg_rows, reg_points = [], []
+    for s in STRATS:
+        g = pd.concat([cl[cl.strategy == s], sweep["clean"][sweep["clean"].strategy == s]])
+        h = het_r.loc[list(zip(g.partition, g.seed))]
+        X = pd.DataFrame({"jsd": h.mean_pairwise_jsd.to_numpy(), "cv": h.shard_size_cv.to_numpy()})
+        y = c_rnd.loc[g.seed].to_numpy() - g.sel_macro_f1.to_numpy()
+        reg_points.append(pd.DataFrame({"strategy": s, "partition": g.partition.to_numpy(), "seed": g.seed.to_numpy(),
+                                        "jsd": X.jsd, "cv": X.cv, "gap": y}))
+        fit = sm.OLS(y, sm.add_constant(X)).fit()
+        ci = fit.conf_int()
+        reg_rows.append({"strategy": s, "n_runs": len(y), "partitions": " ".join(sorted(g.partition.unique())),
+                         "intercept": fit.params["const"],
+                         "coef_jsd": fit.params["jsd"], "se_jsd": fit.bse["jsd"], "p_jsd": p3s(fit.pvalues["jsd"]),
+                         "ci95_jsd_low": ci.loc["jsd", 0], "ci95_jsd_high": ci.loc["jsd", 1],
+                         "coef_cv": fit.params["cv"], "se_cv": fit.bse["cv"], "p_cv": p3s(fit.pvalues["cv"]),
+                         "ci95_cv_low": ci.loc["cv", 0], "ci95_cv_high": ci.loc["cv", 1],
+                         "r2": fit.rsquared, "adj_r2": fit.rsquared_adj, "corr_jsd_cv": X.jsd.corr(X.cv),
+                         "mean_gap": y.mean()})
+    rt = pd.DataFrame(reg_rows)
+    rt["note"] = ("gap = centralized val-selected test macro-F1 (same seed) - run's; OLS gap ~ 1 + JSD + CV; "
+                  "random protocol R = 100; fedavg/fedadam include the alpha sweep")
+    r3(rt).to_csv(tab / "stats_regression_gap.csv", index=False)
+    r3(pd.concat(reg_points)).to_csv(tab / "stats_regression_points.csv", index=False)
+
+    # ---------------------------------------------------------------- figures
     # fig1 leakage diagnostic
     fig, ax = plt.subplots(figsize=(SINGLE, 2.1))
     cats = ["Macro-F1"] + CLASSES
@@ -337,7 +428,7 @@ def main() -> None:
     save(fig, figd / "fig1_leakage_diagnostic.png")
 
     # fig2 heatmap (double column)
-    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE, 3.3), sharey=True, gridspec_kw={"wspace": 0.06})
+    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE, 3.6), sharey=True, gridspec_kw={"wspace": 0.06})
     for ax, (pname, d, lab) in zip(axes, (("random", rnd, "(a) Random split, R = 100"),
                                            ("chronological", chrono, "(b) Chronological split, R = 30"))):
         th = t_head[(t_head.protocol == pname) & (t_head.strategy != "centralized")]
@@ -355,21 +446,21 @@ def main() -> None:
         for sp_ in ax.spines.values():
             sp_.set_visible(False)
         cm, cs = ms(d["central"].sel_macro_f1)
-        ax.text(0.5, -0.2, f"{lab}\nCentralized: {cm:.3f} ± {cs:.3f}", transform=ax.transAxes,
+        ax.text(0.5, -0.17, f"{lab}\nCentralized: {cm:.3f} ± {cs:.3f}", transform=ax.transAxes,
                 ha="center", va="top")
     cb = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
     cb.set_label("Val-selected test macro-F1")
     save(fig, figd / "fig2_heatmap_macro_f1.png")
 
     # fig3 convergence (random, R = 100, P0 and P3)
-    fig, axes = plt.subplots(2, 1, figsize=(SINGLE, 4.2), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(SINGLE, 4.4), sharex=True)
     cm = rnd["central"].sel_macro_f1.mean()
-    for ax, p in zip(axes, ("P0", "P3_m1")):
+    for ax, p in zip(axes, ("P0", P3)):
         for s in STRATS:
-            ids = rnd["clean"][(rnd["clean"].strategy == s) & (rnd["clean"].partition == p)].run_id
+            ids = cell(rnd, s, p).run_id
             g = rnd["rounds"][rnd["rounds"].run_id.isin(ids)].groupby("round")["macro_f1"].agg(["mean", "std"])
             ax.plot(g.index, g["mean"], color=COLOR[s], ls=LSTYLE[s], lw=1.1, label=LABEL[s])
-            ax.fill_between(g.index, g["mean"] - g["std"], g["mean"] + g["std"], color=COLOR[s], alpha=0.15, lw=0)
+            ax.fill_between(g.index, g["mean"] - g["std"], g["mean"] + g["std"], color=COLOR[s], alpha=0.12, lw=0)
         ax.axhline(cm, color="k", ls="--", lw=0.9, label="Centralized")
         ax.set_ylim(0, 1)
         ax.set_ylabel("Test macro-F1")
@@ -381,48 +472,173 @@ def main() -> None:
     save(fig, figd / "fig3_convergence_random_r100.png")
 
     # fig4 per-class recall under random P3
-    fig, ax = plt.subplots(figsize=(SINGLE, 2.4))
+    fig, ax = plt.subplots(figsize=(SINGLE, 2.5))
     cls_order = ["DoS", "Probe", "DDoS", "BFA", "Normal"]
     x = np.arange(len(cls_order))
-    w = 0.8 / len(STRATS)
-    g3 = rnd["clean"][rnd["clean"].partition == "P3_m1"]
+    w = 0.84 / len(STRATS)
     for i, s in enumerate(STRATS):
-        g = g3[g3.strategy == s]
+        g = cell(rnd, s, P3)
         means = [g[f"sel_recall_{c}"].mean() for c in cls_order]
         sds = [g[f"sel_recall_{c}"].std(ddof=1) for c in cls_order]
-        ax.bar(x - 0.4 + (i + 0.5) * w, means, w, yerr=clip_err(means, sds), color=COLOR[s], edgecolor="k", lw=0.3,
-               capsize=0.8, error_kw={"lw": 0.5}, label=LABEL[s])
+        ax.bar(x - 0.42 + (i + 0.5) * w, means, w, yerr=clip_err(means, sds), color=COLOR[s], edgecolor="k", lw=0.3,
+               capsize=0.7, error_kw={"lw": 0.5}, label=LABEL[s])
     ax.set_xticks(x, cls_order)
     ax.set_ylabel("Test recall (random, P3)")
     ax.set_ylim(0, 1.05)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.32), ncol=4, columnspacing=0.8, handlelength=1.2)
     save(fig, figd / "fig4_per_class_recall_random_P3.png")
 
-    # fig5 poisoning
-    fig, axes = plt.subplots(2, 1, figsize=(SINGLE, 3.6), sharex=True)
+    # fig5 poisoning (double column): (a) chronological P4, R = 30; (b) random P3, R = 100
+    fig, axes = plt.subplots(2, 2, figsize=(DOUBLE, 3.6), sharex=True, sharey="row",
+                             gridspec_kw={"wspace": 0.08})
     conds = ["clean", "sign_flip", "targeted"]
-    pstr = ["fedavg", "krum", "median", "trimmed_mean"]
     x = np.arange(len(conds))
-    w = 0.8 / len(pstr)
-    for ax, (col, ylab) in zip(axes, (("macro_f1", "Test macro-F1"), ("attack_fnr", "Attack FNR"))):
-        for i, s in enumerate(pstr):
-            g = t_poison[t_poison.strategy == s].set_index("attack").loc[conds]
-            ax.bar(x - 0.4 + (i + 0.5) * w, g[f"{col}_mean"], w,
-                   yerr=clip_err(g[f"{col}_mean"], g[f"{col}_std"]), color=COLOR[s],
-                   edgecolor="k", lw=0.3, capsize=1.2, error_kw={"lw": 0.5}, label=LABEL[s])
-        ax.set_ylabel(ylab)
-        ax.set_ylim(0, 1)
-    axes[1].set_xticks(x, ["Clean", "Sign flip", "Targeted"])
-    axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, 1.25), ncol=4, columnspacing=0.8, handlelength=1.2)
+    w = 0.8 / len(POISON)
+    for j, (tp, lab) in enumerate(((t_poison, "(a) Chronological, P4, R = 30"), (t_poison_r, "(b) Random, P3, R = 100"))):
+        for i_row, (col, ylab) in enumerate((("macro_f1", "Test macro-F1"), ("attack_fnr", "Attack FNR"))):
+            ax = axes[i_row, j]
+            for i, s in enumerate(POISON):
+                g = tp[tp.strategy == s].set_index("attack").loc[conds]
+                ax.bar(x - 0.4 + (i + 0.5) * w, g[f"{col}_mean"], w,
+                       yerr=clip_err(g[f"{col}_mean"], g[f"{col}_std"]), color=COLOR[s],
+                       edgecolor="k", lw=0.3, capsize=1.2, error_kw={"lw": 0.5}, label=LABEL[s])
+            if j == 0:
+                ax.set_ylabel(ylab)
+            ax.set_ylim(0, 1)
+        axes[1, j].set_xticks(x, ["Clean", "Sign flip", "Targeted"])
+        axes[1, j].text(0.5, -0.3, lab, transform=axes[1, j].transAxes, ha="center", va="top")
+    axes[0, 0].legend(loc="upper center", bbox_to_anchor=(1.04, 1.25), ncol=4, columnspacing=0.8, handlelength=1.2)
     fig.tight_layout(h_pad=0.5)
     save(fig, figd / "fig5_poisoning.png")
+
+    # fig6 CD diagram (Demsar style)
+    order = list(mean_ranks.index)
+    cliques = []
+    for i in range(k):
+        j = i
+        while j + 1 < k and all(nem.loc[order[a], order[b]] >= 0.05 for a in range(i, j + 2) for b in range(i, j + 2) if a < b):
+            j += 1
+        if j > i and not any(c0 <= i and j <= c1 for c0, c1 in cliques):
+            cliques.append((i, j))
+    fig, ax = plt.subplots(figsize=(SINGLE, 1.9))
+    lo, hi = 1, k
+    ax.set_xlim(lo - 0.3, hi + 0.3)
+    ax.set_ylim(0.12, 1.08)
+    ax.axis("off")
+    y_axis = 0.74
+    ax.plot([lo, hi], [y_axis, y_axis], color="k", lw=0.8)
+    for t in range(lo, hi + 1):
+        ax.plot([t, t], [y_axis, y_axis + 0.03], color="k", lw=0.8)
+        ax.text(t, y_axis + 0.05, str(t), ha="center", va="bottom")
+    ax.plot([lo, lo + cd], [0.96, 0.96], color="k", lw=1.2)
+    for xx in (lo, lo + cd):
+        ax.plot([xx, xx], [0.94, 0.98], color="k", lw=1.0)
+    ax.text(lo + cd + 0.1, 0.96, f"CD = {cd:.2f}", ha="left", va="center")
+    half = (k + 1) // 2
+    for idx_, s in enumerate(order):
+        r = mean_ranks[s]
+        left = idx_ < half
+        y = y_axis - 0.16 - 0.12 * (idx_ if left else (k - 1 - idx_))
+        xt = lo - 0.25 if left else hi + 0.25
+        ax.plot([r, r, xt], [y_axis, y, y], color=COLOR[s] if s != "trimmed_mean" else "#B8A800", lw=0.9)
+        ax.text(xt + (-0.05 if left else 0.05), y, f"{LABEL[s]} ({r:.2f})", ha="right" if left else "left", va="center")
+    for ci, (i, j) in enumerate(cliques):
+        yy = y_axis - 0.04 - 0.035 * ci
+        ax.plot([mean_ranks[order[i]] - 0.05, mean_ranks[order[j]] + 0.05], [yy, yy], color="k", lw=2.2)
+    save(fig, figd / "fig6_cd_diagram.png")
+
+    # fig8 tuning: score per trial vs client learning rate
+    fig, ax = plt.subplots(figsize=(SINGLE, 2.6))
+    for s in ["central"] + STRATS:
+        g = tun_trials[tun_trials.strategy == s].sort_values("lr")
+        ok = g[g.eligible]
+        ax.plot(ok.lr, ok.score, color=COLOR[s], ls=LSTYLE[s], lw=0.9, marker="o", ms=2.2, label=LABEL[s])
+        bad = g[~g.eligible]
+        if len(bad):
+            ax.plot(bad.lr, np.zeros(len(bad)) + 0.02, ls="none", marker="x", ms=3.5, color=COLOR[s])
+        best = g[g["rank"] == 1]
+        ax.plot(best.lr, best.score, ls="none", marker="*", ms=7, color=COLOR[s], mec="k", mew=0.4)
+    ax.set_xscale("log")
+    ax.set_xlabel("Client learning rate")
+    ax.set_ylabel("Tuning score (val. macro-F1)")
+    ax.set_ylim(0, 1)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.36), ncol=3, columnspacing=0.8, handlelength=1.6)
+    save(fig, figd / "fig8_tuning.png")
+
+    # fig9 heterogeneity sweep (FedAvg / FedAdam)
+    fig, ax = plt.subplots(figsize=(SINGLE, 2.3))
+    sw_parts = ["P1_a0.1", "P1_a0.5", "P1_a1", "P1_a10", "P0", "P2_b0.5"]
+    x = np.arange(len(sw_parts))
+    w = 0.36
+    for i, s in enumerate(("fedavg", "fedadam")):
+        g = t_sweep[t_sweep.strategy == s].set_index("partition").loc[sw_parts]
+        ax.bar(x + (i - 0.5) * w, g.macro_f1_mean, w, yerr=clip_err(g.macro_f1_mean, g.macro_f1_std),
+               color=COLOR[s], edgecolor="k", lw=0.3, capsize=1.2, error_kw={"lw": 0.5}, label=LABEL[s])
+    ax.axhline(cm, color="k", ls="--", lw=0.9, label="Centralized")
+    jsd = t_sweep[t_sweep.strategy == "fedavg"].set_index("partition").loc[sw_parts, "mean_jsd"]
+    ax.set_xticks(x, [f"{PLABEL[p].replace(' (', chr(10) + '(')}\nJSD {jsd[p]:.2f}" for p in sw_parts])
+    ax.set_ylabel("Val-selected test macro-F1")
+    ax.set_ylim(0, 1.05)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.2), ncol=3)
+    save(fig, figd / "fig9_heterogeneity_sweep.png")
+
+    # fig10 regression coefficients (gap ~ JSD + CV), 95% CI
+    fig, axes = plt.subplots(1, 2, figsize=(SINGLE, 2.4), sharey=True, gridspec_kw={"wspace": 0.12})
+    yy = np.arange(len(STRATS))[::-1]
+    for ax, (v, lab) in zip(axes, (("jsd", "JSD coefficient"), ("cv", "CV coefficient"))):
+        for yi, s in zip(yy, STRATS):
+            r_ = rt.set_index("strategy").loc[s]
+            ax.errorbar(r_[f"coef_{v}"], yi, xerr=[[r_[f"coef_{v}"] - r_[f"ci95_{v}_low"]],
+                                                   [r_[f"ci95_{v}_high"] - r_[f"coef_{v}"]]],
+                        fmt="o", ms=3, color=COLOR[s] if s != "trimmed_mean" else "#B8A800", elinewidth=0.9, capsize=1.5)
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_xlabel(lab)
+    axes[0].set_yticks(yy, [LABEL[s] for s in STRATS])
+    save(fig, figd / "fig10_gap_regression.png")
+
+    # fig11 bootstrap CI of difference to FedAvg
+    fig, ax = plt.subplots(figsize=(SINGLE, 2.2))
+    yy = np.arange(len(others))[::-1]
+    sig = wt.set_index("strategy")["significant_holm_0.05"]
+    for yi, s in zip(yy, others):
+        r_ = bt.set_index("strategy").loc[s]
+        ax.errorbar(r_.mean_diff, yi, xerr=[[r_.mean_diff - r_.ci95_low], [r_.ci95_high - r_.mean_diff]], fmt="o",
+                    ms=3.5, color=COLOR[s] if s != "trimmed_mean" else "#B8A800", elinewidth=1.0, capsize=2)
+        if sig[s]:
+            ax.text(r_.ci95_high + 0.01, yi, "*", va="center", ha="left")
+    ax.axvline(0, color="k", lw=0.6)
+    ax.set_yticks(yy, [LABEL[s] for s in others])
+    ax.set_xlabel("Macro-F1 difference to FedAvg (95% CI)")
+    save(fig, figd / "fig11_bootstrap_ci_vs_fedavg.png")
+
+    # fig12 local-only baseline vs federated
+    fig, ax = plt.subplots(figsize=(SINGLE, 2.3))
+    x = np.arange(len(PARTS))
+    w = 0.26
+    tl = t_local.set_index("partition").loc[PARTS]
+    lm = tl.local_mean_client_mean
+    ax.bar(x - w, lm, w, color="#DDDDDD", edgecolor="k", lw=0.3, label="Local only (mean client)")
+    ax.errorbar(x - w, lm, yerr=[lm - tl.local_worst_client_mean, tl.local_best_client_mean - lm], fmt="none",
+                ecolor="k", elinewidth=0.6, capsize=1.5)
+    for i, s in enumerate(("fedavg", "fedadam")):
+        ax.bar(x + i * w, tl[f"{s}_mean"], w, yerr=clip_err(tl[f"{s}_mean"], tl[f"{s}_std"]), color=COLOR[s],
+               edgecolor="k", lw=0.3, capsize=1.2, error_kw={"lw": 0.5}, label=LABEL[s])
+    ax.axhline(cm, color="k", ls="--", lw=0.9, label="Centralized")
+    ax.set_xticks(x, [PLABEL[p].replace(" (", "\n(") for p in PARTS])
+    ax.set_ylabel("Test macro-F1")
+    ax.set_ylim(0, 1.05)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncol=2)
+    save(fig, figd / "fig12_local_only.png")
 
     # console summary
     print(f"Friedman chi2 = {stat:.3f}, p = {pval:.3g} (k = {k}, n = {n}); Nemenyi CD(0.05) = {cd:.3f}")
     print("Mean ranks (1 = best):", ", ".join(f"{s} {r:.2f}" for s, r in mean_ranks.items()))
-    print("Significant pairs (p < 0.05):", ", ".join(f"{a}-{b} ({p:.3g})" for a, b, p in sig_pairs) or "none")
-    print("Cliques (not significantly different):",
-          [[order[t] for t in range(i, j + 1)] for i, j in cliques])
+    print("Significant Nemenyi pairs (p < 0.05):", ", ".join(f"{a}-{b} ({p:.3g})" for a, b, p in sig_pairs) or "none")
+    print("Cliques:", [[order[t] for t in range(i, j + 1)] for i, j in cliques])
+    print(wt[["strategy", "median_diff", "mean_diff", "n_better", "n_worse", "rank_biserial_r", "p_raw", "p_holm",
+              "significant_holm_0.05"]].to_string(index=False))
+    print(r3(bt[["strategy", "mean_diff", "ci95_low", "ci95_high", "ci_excludes_zero"]]).to_string(index=False))
+    print(r3(rt[["strategy", "n_runs", "coef_jsd", "p_jsd", "coef_cv", "p_cv", "r2", "corr_jsd_cv"]]).to_string(index=False))
 
 
 if __name__ == "__main__":

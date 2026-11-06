@@ -173,12 +173,12 @@ def fig_pipeline(out: Path) -> None:
         (1, top, "2. Preprocessing", "drop identifiers; dedup (feature + label,\nconflicts removed); rare-family rule;\n"
                                      "20k class cap; per-family minute split", FILL),
         (2, top, "3. Partitioner", "P0 IID · P1 Dirichlet α=0.5\nP3 attack-type m=1 · P4 α=β=0.5\n"
-                                   "K = 8 controllers · seeds 0–2", FILL),
-        (0, bot, "4. Simulation", "plain PyTorch, clients sequential\nMLP · E=1 · B=256 · SGD lr 0.05\n"
-                                  "federated standardization", FILL2),
-        (1, bot, "5. Aggregation (7 strategies)", None, FILL2),
+                                   "K = 8 controllers · seeds 0–4", FILL),
+        (0, bot, "4. Simulation", "plain PyTorch, clients sequential\nMLP · E=1 · B=256 · plain SGD\n"
+                                  "tuned (12-trial random search, seed 99)", FILL2),
+        (1, bot, "5. Aggregation (8 strategies)", None, FILL2),
         (2, bot, "6. Metrics + statistics", "val-selected macro-F1, per-class recall\nT95, bytes, worst-client F1\n"
-                                            "Friedman/Nemenyi, Wilcoxon vs FedAvg", "white"),
+                                            "Friedman/Nemenyi, Wilcoxon, bootstrap,\nregression on JSD / CV", "white"),
     ]
     centers = []
     for col, y, title, body, fc in stages:
@@ -191,11 +191,11 @@ def fig_pipeline(out: Path) -> None:
     # strategy names in their colors
     x, y = centers[4]
     rows = [STRATS[:4], STRATS[4:]]
-    fracs = ([0.13, 0.37, 0.62, 0.87], [0.2, 0.5, 0.78])
+    fracs = ([0.13, 0.37, 0.62, 0.87], [0.13, 0.33, 0.55, 0.83])
     for ri, row in enumerate(rows):
         for fx, s in zip(fracs[ri], row):
             text(ax, x + bw * fx, y + 0.5 - ri * 0.2, LABEL[s], color=TEXT_STRAT[s], fontweight="bold")
-    text(ax, x + bw / 2, y + 0.12, "poisoning: f = 2 of 8 (chronological, P4)", color=MAL)
+    text(ax, x + bw / 2, y + 0.12, "poisoning: f = 2 of 8 (chrono P4, random P3)", color=MAL)
     # arrows along the rows and the turn
     for a, b in ((0, 1), (1, 2), (3, 4), (4, 5)):
         xa, ya = centers[a]

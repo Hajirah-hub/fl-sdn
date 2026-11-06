@@ -1,0 +1,66 @@
+# Frozen by scripts/run_study.py --suite tuning. Do not edit by hand.
+dataset: insdn
+protocol: random
+task: multi
+seed: 99
+R: 30
+partitions:
+- P1_a0.5
+- P3_m1
+- P4_a0.5b0.5
+n_trials: 12
+search:
+  lr: log-uniform [1e-3, 3e-1], 12 values drawn once (rng 99), shared
+  mu: FedProx, log-uniform [1e-3, 1] (rng [99, 1])
+  server_lr: FedAdam, log-uniform [1e-2, 1] (rng [99, 2])
+  eps: FedAdam, log-uniform [1e-3, 1e-1] (rng [99, 3])
+score: mean over partitions of the best pooled validation macro-F1 over rounds; diverged
+  trials ineligible; ties -> earliest trial
+fixed:
+  E: 1
+  batch: 256
+  K: 8
+  f_hat: 2
+  beta1: 0.9
+  beta2: 0.99
+  scaffold_global_lr: 1.0
+strategies:
+  central:
+    lr: 0.201752
+    trial: 10
+    val_score: 0.9189
+  fedadam:
+    lr: 0.0143917
+    server_lr: 0.284777
+    eps: 0.00666502
+    trial: 8
+    val_score: 0.8777
+  fedavg:
+    lr: 0.25599
+    trial: 3
+    val_score: 0.8478
+  fednova:
+    lr: 0.25599
+    trial: 3
+    val_score: 0.8428
+  fedprox:
+    lr: 0.201752
+    mu: 0.0011662
+    trial: 10
+    val_score: 0.8421
+  krum:
+    lr: 0.201752
+    trial: 10
+    val_score: 0.4019
+  median:
+    lr: 0.25599
+    trial: 3
+    val_score: 0.594
+  scaffold:
+    lr: 0.201752
+    trial: 10
+    val_score: 0.8795
+  trimmed_mean:
+    lr: 0.25599
+    trial: 3
+    val_score: 0.6125
