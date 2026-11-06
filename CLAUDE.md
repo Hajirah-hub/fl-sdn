@@ -250,3 +250,27 @@ checkpoint_every: 1
 - Writes are atomic (write temp file, then `os.replace`).
 - Test: a run interrupted and resumed must give results identical to an uninterrupted run.
 - Kaggle sessions are time-limited: drivers take a list of configs and rely on this to continue.
+
+## Reduced study (time-boxed; plain PyTorch, no Flower/Ray)
+
+`src/fedsdn/sim.py` + `scripts/run_reduced.py` (runs, resumable via per-run JSON markers,
+`results/progress.log`) + `scripts/report_reduced.py` (`results/report/`). InSDN, multi-class only,
+K = 8, E = 1, R = 30, batch 256, SGD lr 0.05, MLP; partitions P0, P1 α=0.5, P3 m=1, P4; seeds 0–2.
+Strategies: FedAvg, FedProx (μ 0.01), FedNova, FedAdam (server lr 0.01, β 0.9/0.99, ε 1e-3),
+Krum / Median / Trimmed Mean (f̂ = 2, clients weighted equally). Poisoning (chrono only): P4, f = 2,
+sign flip (−update) and targeted (malicious clients relabel attack rows as Normal).
+- **Protocols**: `chrono` (primary; `processed/insdn`, `partitions/insdn`) and `random` (secondary
+  random stratified 80/20 split of the same rows, by partition family, seed 0;
+  `processed/insdn_random`, `partitions/insdn_random`; `scripts/make_random_split.py`). The random
+  protocol is a leakage diagnostic only, never compared directly with chrono.
+- **Headline metric = val-selected test macro-F1**: every round logs global validation macro-F1
+  (pooled over all clients' validation sets); the run reports test metrics at the best-validation
+  round (ties → earliest). The test set is never used for selection. Also reported: final round
+  and AUC (mean test macro-F1 over rounds). Centralized baseline holds out a stratified 10% of the
+  training pool as validation.
+- T95 = first round with test macro-F1 ≥ 0.95 × the protocol's mean centralized val-selected
+  macro-F1 (censored otherwise). Bytes per round = params × 4 B × 2K.
+- Diagnostics (`scripts/diag_central.py`, chrono, seed 0): the baseline is neither underfitting
+  (train F1 0.88) nor undertrained (100 epochs: test F1 0.52); random split gives 0.95. The gap is
+  distribution shift: BFA test recall 0 (held-out address pair), Probe ≈ 0.3.
+- Old chrono results without validation logging: `results/archive_chrono_v1_noval/`.

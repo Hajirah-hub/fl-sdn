@@ -3,6 +3,8 @@
     python scripts/make_partitions.py --dataset insdn --K 8 --seeds 0-4
     python scripts/make_partitions.py --dataset insdn --settings P1_a0.1 P3_m1 --seeds 0
     python scripts/make_partitions.py --dataset insdn --report-only --show-clients P3_m1_K8_s0
+    python scripts/make_partitions.py --dataset insdn --variant random --seeds 0-2 \
+        --settings P0 P1_a0.5 P3_m1 P4_a0.5b0.5        # secondary (random-split) protocol
 
 Reads $FEDSDN_DATA/processed/<ds>/{flows.parquet, meta.json}; writes
 $FEDSDN_DATA/partitions/<ds>/<scheme>_<param>_K<K>_s<seed>.{parquet,json}.
@@ -61,13 +63,15 @@ def main() -> None:
     ap.add_argument("--K", type=int, default=8)
     ap.add_argument("--seeds", default="0-4")
     ap.add_argument("--settings", nargs="*", help="setting tags, e.g. P0 P1_a0.1 (default: all)")
+    ap.add_argument("--variant", default="", help="e.g. 'random' -> processed/<ds>_random, partitions/<ds>_random")
     ap.add_argument("--report-only", action="store_true")
     ap.add_argument("--show-clients", nargs="*", default=[], help="partition names to detail")
     args = ap.parse_args()
 
     data = Path(os.environ.get("FEDSDN_DATA", "./data"))
-    proc = data / "processed" / args.dataset
-    out_dir = data / "partitions" / args.dataset
+    name = f"{args.dataset}_{args.variant}" if args.variant else args.dataset
+    proc = data / "processed" / name
+    out_dir = data / "partitions" / name
     settings = [s for s in SETTINGS if not args.settings or s.tag in args.settings]
     seeds = parse_seeds(args.seeds)
 
@@ -90,7 +94,7 @@ def main() -> None:
         for st in settings:
             for seed in seeds:
                 part, side = make_partition(pool, st, args.K, seed, benign=benign,
-                                            flows_sha256=sha, dataset=args.dataset)
+                                            flows_sha256=sha, dataset=name)
                 write_partition(out_dir, part, side)
                 sidecars.append(side)
         print(f"wrote {len(sidecars)} partitions to {out_dir} ({len(pool)} training-pool rows)")
