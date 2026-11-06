@@ -284,3 +284,5 @@ sign flip (−update) and targeted (malicious clients relabel attack rows as Nor
   separate columns; Friedman + Nemenyi on random R = 100 val-selected macro-F1, blocks =
   partition × seed) and `results/paper_figures/*.png` (300 dpi, 3.5 in single column, Okabe-Ito
   colors fixed per strategy, no titles). Never built from `results/dry`.
+  Font: STIXGeneral (Times-like, bundled with matplotlib). Architecture / pipeline diagrams:
+  `scripts/paper_diagrams.py` → fig0_system_architecture, fig_model_architecture, fig_pipeline.

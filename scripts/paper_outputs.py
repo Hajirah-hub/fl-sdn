@@ -56,7 +56,7 @@ Q05_K7 = 2.949            # Nemenyi critical value q_0.05 for k = 7 (Demsar 2006
 def style() -> None:
     plt.rcParams.update({
         "font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "xtick.labelsize": 8,
-        "ytick.labelsize": 8, "legend.fontsize": 8, "font.family": "serif",
+        "ytick.labelsize": 8, "legend.fontsize": 8, "font.family": "STIXGeneral", "mathtext.fontset": "stix",
         "axes.linewidth": 0.6, "lines.linewidth": 1.2, "savefig.dpi": 300, "figure.dpi": 100,
         "legend.frameon": False, "axes.spines.top": False, "axes.spines.right": False,
     })
