@@ -42,7 +42,8 @@ run instead:
 - Poisoning: chronological protocol, P4, f = 2 of 8 malicious controllers, sign flip and targeted
   (attack → Normal) relabeling, against FedAvg, Krum, Median and Trimmed Mean.
 - Simulation in **plain PyTorch** (all clients run one after another in one process), not
-  Flower. A Flower validation run is in progress and is not part of this document.
+  Flower. A separate Flower validation (Section 15) shows that the plain loop reproduces a real
+  Flower simulation to within 0.0012 macro-F1 per round.
 
 Final results: 111 chronological runs (R = 30) and 87 random-protocol runs (R = 100). The
 headline metric is **validation-selected test macro-F1**: the test score at the round with the
@@ -106,8 +107,8 @@ best pooled validation macro-F1.
 | matplotlib | 3.11.2 |
 | PyYAML | 6.0.3 |
 | pytest | 9.2.0 |
-| flwr[simulation] | 1.43.0 (installed; not used by the reduced study) |
-| ray | 2.55.1 (WSL only; not used by the reduced study) |
+| flwr[simulation] | 1.43.0 (used only for the Flower validation, Section 15) |
+| ray | 2.55.1 (WSL only; used only for the Flower validation, Section 15) |
 
 Full freezes: `requirements-lock.txt` (Windows), `requirements-lock-wsl.txt` (WSL).
 
@@ -137,11 +138,12 @@ Full freezes: `requirements-lock.txt` (Windows), `requirements-lock-wsl.txt` (WS
 | Paper statistics, figures, tables | `d423380` | 2026-11-06 11:04 |
 | Wilcoxon vs FedAvg | `7bdeb48` | 2026-11-06 11:18 |
 | Architecture / model / pipeline diagrams | `51eb753` | 2026-11-06 11:22 |
+| Flower validation (Section 15) | `6c241e8` | 2026-11-06 11:32 |
 
 The runs were started from the working tree shortly before each commit (e.g. the R = 30 runs ran
 09:03–09:32, and their code was committed at 09:33). The simulation code in `1792d65`–`51eb753` is
-the code that produced the results. The later commit `6c241e8` (Flower validation, excluded from
-this document) adds an option to `sim.py` that is off by default and does not affect these
+the code that produced the results. The later commit `6c241e8` (Flower validation, Section 15)
+adds an option to `sim.py` (`per_step_seed`) that is off by default and does not affect these
 results.
 
 Data fingerprints: `flows.parquet` SHA-256 `fbf3ad7570b8…a52c` (chronological). Raw CSV SHA-256s
@@ -565,7 +567,8 @@ scores.** It is used only to rank strategies against each other.
   Runs that never reach it are censored. Tables report the mean T95 over the seeds that reach it,
   plus the number of censored seeds.
 - **Bytes per round** (derived, not measured): params × 4 B × 2K = 17,413 × 4 × 16 =
-  **1,114,432 B (1.11 MB)**, the same for all 7 strategies. **MB to T95** = T95 × 1.114 MB.
+  **1,114,432 B (1.11 MB)**, the same for all 7 strategies. **MB to T95** = T95 × 1.114 MB. The
+  Flower validation measured the real serialized size at 1.028 × this value (Section 15).
 - **Time:** each round's wall-clock time is logged per run (`wall_s`). Client CPU time and server
   aggregation time were **not** measured separately. With 4 worker processes sharing 2 physical
   cores, wall time is not a clean cost measure.
@@ -583,6 +586,7 @@ scores.** It is used only to rank strategies against each other.
 | R = 100, part 1 | random, FedAvg + FedAdam × 4 partitions × 3 seeds | 24 | 8.6 min (10:03:17–10:11:52) | `results/r100/random/` | final |
 | R = 100, part 2 | random, centralized 100 epochs (3) + FedProx, FedNova, Krum, Median, Trimmed Mean × 12 | 63 | 21.5 min (10:35:58–10:57:25) | `results/r100/random/` | final (87 runs with part 1) |
 | Centralized diagnostics | `diag_central.py`, seed 0: chrono 30 ep lr 0.05; random 30 ep; chrono 100 ep lr 0.1 | 3 | not recorded | console only | diagnostic; numbers in Section 7 |
+| Flower validation | random, P4, seed 0, R = 30: FedAvg / FedAdam / Median, each in Flower and in the plain loop with `per_step_seed` | 3 + 3 | about 1.5 min per strategy (finished 11:31:42) | `results/flower_validation/`, `results/flower_validation.log` | validation; Section 15 |
 
 - **Why R = 30 was superseded for the random protocol:** at R = 30 the validation-selected rounds
   sat near the end of training, and in the R = 30 report (`results/report/t95_random.csv`) T95 was
@@ -596,8 +600,7 @@ scores.** It is used only to rank strategies against each other.
 - **Final results used in the paper:** `results/chrono/` (111 runs, R = 30) and
   `results/r100/random/` (87 runs, R = 100). `results/random/` (R = 30) is used only for the
   R = 30 vs R = 100 table and for the leakage diagnostic (30 epochs on both protocols).
-- The Flower validation run (`results/flower_validation*`) is excluded here (see the last
-  section).
+- The Flower validation run (`results/flower_validation*`) is described in Section 15.
 
 ---
 
@@ -933,6 +936,7 @@ titles. Tables: CSV, 3 decimals, mean and std in separate columns.
 | `fig4_per_class_recall_random_P3.png` | Per-class test recall at the validation-selected round under P3 (m = 1), random split, R = 100, for the 7 strategies (mean ± std, 3 seeds). | Results (per-class) |
 | `fig5_poisoning.png` | Poisoning on the chronological split, P4, R = 30, f = 2 of 8 malicious controllers: test macro-F1 (top) and attack false-negative rate (bottom) for FedAvg, Krum, Median and Trimmed Mean, clean vs sign flip vs targeted (attack → Normal) relabeling (mean ± std, 3 seeds). | Results (RQ3) |
 | `fig6_cd_diagram.png` | Critical-difference diagram (Nemenyi, α = 0.05, CD = 2.601) of mean ranks of the 7 strategies over 12 partition × seed blocks, random split, R = 100, validation-selected test macro-F1 (Friedman p = 1.75 × 10⁻¹⁰). Strategies joined by a bar are not significantly different. | Results (statistics) |
+| `fig7_flower_vs_loop.png` | Test macro-F1 per round of the plain PyTorch simulation and a Flower simulation (Ray backend) for FedAvg (Flower built-in), FedAdam (custom Flower strategy using our aggregation) and Median (Flower built-in FedMedian); random split, P4, seed 0, R = 30. The plain loop with per-step seeding matches Flower to within 0.0012; the original runs differ only through the dropout random stream. | Implementation (validation) |
 
 Internal report figures (`results/report/figures/`, not styled for the paper):
 `convergence_P4.png` (per-round curves under P4) and `rare_recall.png` (recall of the
@@ -956,8 +960,7 @@ smallest-training-count class per strategy and partition, both protocols).
 | `stats_nemenyi_pvalues.csv` | Nemenyi post-hoc p-values for all strategy pairs (random, R = 100). | Appendix |
 | `stats_wilcoxon_vs_fedavg.csv` | Wilcoxon signed-rank tests of each strategy vs FedAvg over 12 blocks (random, R = 100), two-sided, Holm-corrected, with median difference and rank-biserial r. | Results / Statistics |
 
-`results/paper_figures/fig7_flower_vs_loop.png` and `results/paper_tables/flower_validation.csv`
-belong to the Flower validation and are left out of this document (see the last section).
+| `flower_validation.csv` | Flower vs plain loop (random, P4, seed 0, R = 30) for FedAvg, FedAdam, Median: final macro-F1 of each implementation, max / mean per-round differences, measured serialized bytes per round (upload / download) vs the derived value, and wall time per round. F1 differences given to 6 decimals. | Implementation (validation) |
 
 Supporting files in `results/report/`: `tables.md` (all tables side by side) and
 `t95_*.csv` (per-run T95; `t95_chrono.csv` and `t95_chrono_R30.csv` are identical;
@@ -978,7 +981,7 @@ Supporting files in `results/report/`: `tables.md` (all tables side by side) and
 | Partitions | 10 settings | all 10 built (chrono, seeds 0–4); 4 run: P0, P1 α0.5, P3 m1, P4 | Time; the 4 are the IID reference plus the paper's 3 headline/tuning partitions |
 | P4 | "Dirichlet α = 0.5 with quantity β = 0.5" | product reweighting q_{c,k}·s_k, normalized per family | Method not specified in the paper; this construction reduces to P1 / P2 at the limits (approved) |
 | Strategies | 8 incl. SCAFFOLD | 7, no SCAFFOLD | Time |
-| Framework | Flower simulation, each client a process; measured message sizes | plain PyTorch, clients sequential in one process; bytes derived | No Ray wheel on Windows + Python 3.13, and speed; Flower validation pending |
+| Framework | Flower simulation, each client a process; measured message sizes | plain PyTorch, clients sequential in one process; bytes derived | No Ray wheel on Windows + Python 3.13, and speed. Validated against Flower on one configuration (Section 15): ≤ 0.0012 macro-F1 per round with matched seeds; measured messages 1.028 × the derived size |
 | Tuning | 12 random-search trials per strategy (lr, μ, η_s, ε) | none; lr 0.05, μ 0.01, η_s 0.01, ε 1e-3 fixed | Time |
 | K, E | K ∈ {4, 8, 16}, E ∈ {1, 5} sweeps | K = 8, E = 1 only | Time |
 | Rounds | R = 100 | chrono R = 30; random R = 100 (R = 30 kept for comparison) | Time; R = 30 proved too short on the random protocol, so it was extended |
@@ -1027,10 +1030,11 @@ Supporting files in `results/report/`: `tables.md` (all tables side by side) and
 - **Poisoning:** one setting (chronological P4, R = 30, f = 2), 3 seeds, with the same malicious
   set {0, 3} in two of them, and large variance. No P3 poisoning, so the "sole holder of a family"
   scenario of H4 was not tested.
-- **Cost measures:** bytes are derived, not measured. Wall time comes from 4 processes on 2
-  physical cores, and client CPU time and server aggregation time were not measured.
-- **Implementation:** a sequential plain-PyTorch simulation, not Flower; equivalence with Flower
-  is the subject of the pending validation below.
+- **Cost measures:** bytes are derived, not measured; the Flower validation found real serialized
+  messages 2.8% larger, for one configuration. Wall time comes from 4 processes on 2 physical
+  cores, and client CPU time and server aggregation time were not measured.
+- **Implementation:** a sequential plain-PyTorch simulation, not Flower. Equivalence was shown for
+  one configuration and three strategies (Section 15), not for every run.
 
 ### Future work
 
@@ -1043,11 +1047,159 @@ Supporting files in `results/report/`: `tables.md` (all tables side by side) and
   distinct minutes) or report per-class results that exclude shift-limited classes; increase R on
   the chronological protocol.
 - Poisoning under P3 and P0, f ∈ {1, 2}, random label flip, and on the random protocol.
-- Measure client CPU time, server aggregation time and serialized message sizes (Flower), and
-  run the Mininet / ONOS transfer check.
+- Measure client CPU time and server aggregation time; extend the Flower validation (Section 15)
+  to the other four strategies, the chronological protocol and the poisoning runs; and run the
+  Mininet / ONOS transfer check.
 - Bootstrap confidence intervals and the regression of the gap to centralized on realized JSD and
   CV.
 
 ---
 
-## Flower validation: pending
+## 15. Flower validation of the plain PyTorch simulation
+
+### Why it was needed
+
+The reduced study did not use Flower (Section 13, "Framework"). All 285 result runs come from
+`src/fedsdn/sim.py`, a plain PyTorch loop that trains the 8 clients one after another in one
+process. That leaves three open questions for anyone reading the results:
+
+1. Would a real federated framework, with separate client processes and serialized messages, give
+   the same results?
+2. Is our own aggregation code correct, or do the strategy rankings partly reflect bugs in it?
+3. Are the derived message sizes (params × 4 B × 2K) close to what is actually sent?
+
+This validation answers all three for a representative configuration.
+
+### What was run
+
+`scripts/flower_validation.py` (commit `6c241e8`, 2026-11-06 11:32), WSL venv,
+`flwr[simulation] 1.43.0` with `ray 2.55.1`, `flwr.simulation.run_simulation` (the same entry
+point as `scripts/smoke_flower.py`). Each client is a Ray actor with 1 CPU, so up to 4 clients
+trained in parallel on the 4 logical threads.
+
+- **Configuration:** random protocol, P4 (α = β = 0.5), seed 0, K = 8, E = 1, R = 30, batch 256,
+  client SGD lr 0.05. The same partition file, model and seed as the plain-loop run
+  `random_<strategy>_P4_a0.5b0.5_s0`.
+- **Three strategies, chosen so that both Flower's code and ours are checked:**
+
+  | run | server-side aggregation | what it checks |
+  |---|---|---|
+  | FedAvg | **Flower's built-in `FedAvg`** | our `aggregate.fedavg` against an independent implementation |
+  | FedAdam | custom Flower strategy that calls **our** `aggregate.FedAdam` | our server optimizer (with state across rounds) inside Flower's message flow |
+  | Median | **Flower's built-in `FedMedian`** | our `aggregate.coordinate_median` against an independent implementation (Flower takes the median of client weights; because all clients start from the same global weights, this equals our median of updates) |
+
+- **Clients:** each Flower `ClientApp` is one controller. It loads only its own shard (by
+  `partition-id` = `client_id`, validation rows excluded, Rare masked) and trains with the
+  **unchanged** `sim.local_train`: same MLP, plain SGD, class-weighted loss and batch order.
+- **Federated statistics round:** before round 1 the server sends a `QUERY` message to every
+  client. Each client replies with its count, per-feature sum and sum of squares, and class counts.
+  The server computes the global mean / std and class weights (`scaling.py`, `class_weights`) and
+  sends them in the training configuration. This is the protocol of Section 5 carried out over
+  real messages, with no pooled data at the server.
+- **Evaluation:** the server evaluates the global model on the test set after every round
+  (`evaluate_fn`); clients never see the test set.
+- **Message size:** every training message sent and received was serialized with Flower's own
+  protobuf encoder (`message_to_proto(...).SerializeToString()`) and its length recorded.
+- **Wall time:** server time between successive rounds, excluding the evaluation itself.
+
+### Matching the random-number streams
+
+In the plain loop, dropout draws from one global PyTorch random stream that runs on across all
+clients and rounds. In Flower, each client trains in its own process with its own stream. So
+even with identical data and batch order, the two implementations draw different dropout masks.
+To separate *implementation* differences from *random-stream* differences, `RunConfig` gained an
+option `per_step_seed` (off by default). It re-seeds PyTorch at the start of each (round, client)
+step with the same number the Flower client uses. Each strategy was therefore run three ways:
+
+- **Flower**;
+- **plain loop, matched** (`per_step_seed=True`, run for this validation);
+- **plain loop, original** (the published R = 30 random-protocol run, one global stream).
+
+The option does not change any published result.
+
+### Results
+
+`results/paper_tables/flower_validation.csv`; per-round values in `results/flower_validation/`.
+Differences are in test macro-F1 and are given to 6 decimals because they are far below 0.001.
+
+| | FedAvg | FedAdam | Median |
+|---|---|---|---|
+| final macro-F1: Flower | 0.811 | 0.825 | 0.571 |
+| final macro-F1: plain loop, matched | 0.810 | 0.825 | 0.571 |
+| final macro-F1: plain loop, original | 0.816 | 0.828 | 0.565 |
+| **max per-round \|diff\|, Flower vs matched** | **0.001184** | **0.000055** | **0.000052** |
+| mean per-round \|diff\|, Flower vs matched | 0.000049 | 0.000002 | 0.000005 |
+| max per-round \|diff\|, Flower vs original | 0.022 | 0.034 | 0.007 |
+| max per-round \|diff\|, matched vs original | 0.021 | 0.034 | 0.007 |
+| final diff, Flower vs original | −0.005 | −0.003 | +0.005 |
+| measured bytes per round: upload / download | 567,541 / 577,827 | 567,551 / 577,837 | 567,551 / 577,837 |
+| measured total ÷ derived (1,114,432 B) | 1.028 | 1.028 | 1.028 |
+| wall time per round: Flower / plain loop | 1.56 s / 0.64 s | 1.30 s / 0.67 s | 1.26 s / 0.57 s |
+
+Figure: `results/paper_figures/fig7_flower_vs_loop.png` (three panels; the Flower curve and the
+matched plain-loop curve lie on top of each other).
+
+**What the numbers mean.**
+
+- **The implementations agree.** With matched random streams, Flower and the plain loop differ by
+  at most 0.0012 macro-F1 in any round. FedAdam and Median agree to about 5 × 10⁻⁵. The FedAvg
+  difference is floating-point rounding: Flower averages the full weight vectors in NumPy, while
+  we average updates in float32 and add them to the global weights, so the last bits differ and
+  drift slightly over 30 rounds.
+- **The remaining gap to the published runs is random-stream noise, not Flower.** Flower vs
+  original and matched vs original differ by the same amount (up to 0.021 / 0.034 / 0.007 per
+  round). The final-round values move by at most 0.005.
+- **Real messages are 2.8% larger than the derived figure.** Upload is 1.9% above the derived
+  557,216 B (17,413 params × 4 B × 8 clients), because of protobuf framing and array names /
+  shapes. Download is 3.7% above, because it also carries the per-round configuration, including
+  the 68-value mean and std vectors and the 5 class weights. The overhead is identical for all
+  three strategies.
+- **Flower is about 2–2.4× slower per round** than the plain loop, even with 4 clients training in
+  parallel against one sequential thread. The extra time is Ray scheduling and message
+  serialization, which dominate at this small model size.
+
+### How this supports the experiment
+
+1. **It closes the main implementation deviation** (Section 13, "Framework"). The results in
+   Sections 9–11 come from the plain loop. This run shows that a real Flower deployment of the
+   same configuration gives the same per-round scores to within 0.0012. Those results can
+   therefore be read as what Flower would have produced, which matches the paper's plan.
+2. **It independently checks our aggregation code.** Flower's built-in FedAvg and FedMedian were
+   written by other people. They agree with our `fedavg` and `coordinate_median`, so the gaps
+   between FedAvg and the robust rules (Sections 9.2 and 10) are not artifacts of our median code.
+   FedAdam ran correctly inside Flower's message flow, keeping its m and v state across rounds,
+   and it is the strategy behind the study's main positive result.
+3. **It shows the privacy-preserving setup works with real messages.** Standardization and class
+   weights were computed from per-client sums over actual message exchange, with the server never
+   seeing raw rows. This is the "raw traffic never leaves a controller" property of Fig. 0.
+4. **It sizes the noise from implementation details.** Changing only how dropout is seeded moved
+   per-round scores by up to 0.034 and final scores by up to 0.005. That is far smaller than the
+   effects the conclusions rest on: FedAdam vs FedAvg +0.051 on average (12 of 12 blocks), robust
+   rules vs FedAvg −0.09 to −0.26. The rankings do not depend on such details.
+5. **It calibrates the cost figures.** The derived 1.114 MB per round understates real serialized
+   traffic by 2.8%. Every MB-to-T95 value in Section 9.4 can be multiplied by 1.028 for measured
+   bytes. Because the overhead is the same for every strategy, no comparison changes.
+6. **It qualifies the wall-time numbers.** The plain loop's per-round times are simulation times,
+   not deployment times: a framework adds roughly 2× overhead at this model size. Wall time was
+   never used to rank strategies.
+
+### Limits of the validation
+
+- One configuration: random protocol, P4, seed 0, R = 30, and three of the seven strategies.
+  FedProx, FedNova, Krum and Trimmed Mean, the chronological protocol and the poisoning runs were
+  not repeated in Flower. FedProx and FedNova change only client-side code that Flower runs
+  unchanged (`local_train`) or a server rule of the same kind as the two that were checked. Krum
+  and Trimmed Mean have Flower built-ins (`Krum`, `FedTrimmedAvg`) that could be compared in the
+  same way. Note that `FedTrimmedAvg` trims a fraction β rather than a count f̂.
+- The comparison is on per-round test macro-F1, not on model weights directly.
+- Message sizes are serialized protobuf sizes in simulation. Transport-level overhead (gRPC, TLS,
+  TCP) in a real deployment is not included.
+- Each configuration took about 1.5 minutes (file timestamps 11:28:49, 11:30:14 and 11:31:42 for
+  the three strategies, each including its matched plain-loop run).
+
+Reproduce (WSL venv, repo root):
+
+```bash
+PYTHONPATH=src ~/venvs/fedsdn/bin/python scripts/flower_validation.py            # full run
+PYTHONPATH=src ~/venvs/fedsdn/bin/python scripts/flower_validation.py --plot-only  # table + figure only
+```
