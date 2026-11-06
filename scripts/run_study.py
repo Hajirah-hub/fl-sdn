@@ -6,6 +6,7 @@
     python scripts/run_study.py --suite sweep     # random, R = 100: FedAvg/FedAdam on P1 a0.1/1/10, P2 b0.5
     python scripts/run_study.py --suite local     # random, local-only baseline, 100 epochs per client
     python scripts/run_study.py --suite poison_random   # random P3 m1, R = 100, 4 rules x 2 attacks
+    python scripts/run_study.py --suite lr_boundary     # tuning seed: lr 0.4 / 0.6 vs frozen best (record only)
     python scripts/run_study.py --suite tuning --dry    # 2 rounds, 1 trial -> results/dry_v2/
     tail -f results/progress.log
 
@@ -50,8 +51,11 @@ SWEEP_PARTITIONS = ("P1_a0.1", "P1_a1", "P1_a10", "P2_b0.5")
 SEEDS = (0, 1, 2, 3, 4)
 TUNE_SEED, N_TRIALS = 99, 12
 POISON_STRATEGIES = ("fedavg", "krum", "median", "trimmed_mean")
+BOUNDARY_STRATEGIES = ("fedavg", "fednova", "fedprox", "scaffold")
+BOUNDARY_LRS = (0.4, 0.6)
 ATTACKS = ("sign_flip", "targeted")
 TUNED_KEYS = {"lr", "mu", "server_lr", "eps"}
+TUNE_LIKE = ("tuning", "lr_boundary")          # suites scored on validation only
 
 
 # --------------------------------------------------------------------------------------------
@@ -189,7 +193,26 @@ def suite_configs(suite: str, tuned: dict[str, dict]) -> list[RunConfig]:
     if suite == "poison_random":
         return [fed(st, partition="P3_m1", seed=s, protocol="random", R=100, attack=a, f=2)
                 for st in POISON_STRATEGIES for a in ATTACKS for s in SEEDS]
+    if suite == "lr_boundary":        # same setup as tuning; only the client lr changes
+        return [RunConfig(kind="fed", strategy=st, partition=p, seed=TUNE_SEED, protocol="random", R=30,
+                          tag=f"lr{lr}", **{**tuned[st], "lr": lr})
+                for st in BOUNDARY_STRATEGIES for lr in BOUNDARY_LRS for p in TUNE_PARTITIONS]
     raise ValueError(suite)
+
+
+def lr_boundary_report(results: Path) -> pd.DataFrame:
+    """Compare lr 0.4 / 0.6 with the frozen best trial (same score definition; frozen values untouched)."""
+    s = pd.read_csv(results / "summary.csv")
+    trials = pd.read_csv(results.parent / "tuning" / "trials.csv")
+    frozen = trials[trials["rank"] == 1].set_index("strategy")
+    g = s.groupby(["strategy", "lr"]).agg(score=("sel_val_macro_f1", "mean"), n_runs=("run_id", "size"),
+                                          diverged=("diverged", "any")).reset_index()
+    g["frozen_lr"] = g.strategy.map(frozen["lr"])
+    g["frozen_score"] = g.strategy.map(frozen["score"])
+    g["diff_vs_frozen"] = g.score - g.frozen_score
+    g["beats_frozen"] = ~g.diverged & (g.score > g.frozen_score)
+    atomic_write(results / "lr_boundary.csv", lambda t: g.to_csv(t, index=False))
+    return g
 
 
 # --------------------------------------------------------------------------------------------
@@ -248,7 +271,8 @@ def collect(results: Path) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--suite", required=True,
-                    choices=["tuning", "random", "chrono", "sweep", "local", "poison_random"])
+                    choices=["tuning", "random", "chrono", "sweep", "local", "poison_random",
+                             "lr_boundary"])
     ap.add_argument("--dataset", default="insdn")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--dry", action="store_true", help="2 rounds, a few runs, results/dry_v2/")
@@ -293,20 +317,25 @@ def main() -> None:
             part = cfg.partition or "-"
             if cfg.attack:
                 part += f"+{cfg.attack}"
-            extra = f" | {cfg.tag} lr {cfg.lr:.4g} | best val F1 {val_f1:.4f}" if args.suite == "tuning" \
+            extra = f" | {cfg.tag} lr {cfg.lr:.4g} | best val F1 {val_f1:.4f}" if args.suite in TUNE_LIKE \
                 else f" | val-sel F1 {sel_f1:.4f} | final F1 {fin_f1:.4f}"
             emit(f"[{args.suite} {i}/{len(todo)}] {el / 60:5.1f} min | ETA {eta / 60:5.1f} min | "
                  f"{cfg.protocol:<6} | {cfg.strategy:<12} | {part:<22} | s{cfg.seed}{extra}")
             key = cfg.strategy + (f"+{cfg.attack}" if cfg.attack else "")
-            sel_by[key].append(val_f1 if args.suite == "tuning" else sel_f1)
+            sel_by[key].append(val_f1 if args.suite in TUNE_LIKE else sel_f1)
             if i % 20 == 0 or i == len(todo):
-                what = "best val F1" if args.suite == "tuning" else "val-selected test F1"
+                what = "best val F1" if args.suite in TUNE_LIKE else "val-selected test F1"
                 cells = [f"{k}={np.mean(v):.3f}(n{len(v)})" for k, v in sorted(sel_by.items())]
                 emit(f"--- [{args.suite}] after {i} runs, mean {what}: " + " ".join(cells))
     n = collect(results)
     if args.suite == "tuning" and not args.dry:
         freeze_tuning(results, args.dataset)
         emit(f"--- [tuning] frozen values -> configs/tuning/{args.dataset}.yaml")
+    if args.suite == "lr_boundary" and not args.dry:
+        for r in lr_boundary_report(results).itertuples():
+            emit(f"--- [lr_boundary] {r.strategy:<9} lr {r.lr:<4} score {r.score:.4f} vs frozen "
+                 f"{r.frozen_score:.4f} (lr {r.frozen_lr:.4g}) diff {r.diff_vs_frozen:+.4f} "
+                 f"diverged {r.diverged} beats {r.beats_frozen}")
     emit(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} [{args.suite}] done: collected {n} runs")
     log.close()
 
