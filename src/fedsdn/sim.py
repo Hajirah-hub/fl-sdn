@@ -57,6 +57,7 @@ class RunConfig:
     beta1: float = 0.9
     beta2: float = 0.99
     eps: float = 1e-3
+    per_step_seed: bool = False  # re-seed torch (dropout) per (round, client); used to match Flower
 
     @property
     def run_id(self) -> str:
@@ -65,7 +66,7 @@ class RunConfig:
         rid = f"{self.protocol}_{self.strategy}_{self.partition}"
         if self.attack:
             rid += f"_{self.attack}_f{self.f}"
-        return f"{rid}_s{self.seed}"
+        return f"{rid}_s{self.seed}" + ("_ps" if self.per_step_seed else "")
 
 
 # --------------------------------------------------------------------------------------------
@@ -96,7 +97,15 @@ def class_weights(counts: np.ndarray) -> torch.Tensor:
 # --------------------------------------------------------------------------------------------
 
 
-def local_train(model, w0, X, y, cw, cfg: RunConfig, gen, prox: bool) -> tuple[torch.Tensor, int]:
+def step_seed(seed: int, r: int, k: int) -> int:
+    """Seed of client k's local data order in round r (also its dropout seed when per_step_seed)."""
+    return seed * 1_000_003 + r * 101 + k
+
+
+def local_train(model, w0, X, y, cw, cfg: RunConfig, gen, prox: bool,
+                torch_seed: int | None = None) -> tuple[torch.Tensor, int]:
+    if torch_seed is not None:
+        torch.manual_seed(torch_seed)          # dropout masks independent of earlier RNG use
     vector_to_parameters(w0.clone(), model.parameters())
     model.train()
     opt = torch.optim.SGD(model.parameters(), lr=cfg.lr, momentum=0.0, weight_decay=0.0)
@@ -233,9 +242,11 @@ def run(cfg: RunConfig, processed_dir: str, partitions_dir: str, meta: dict) -> 
             t0 = time.perf_counter()
             updates, taus = [], []
             for k in range(cfg.K):
-                gen = torch.Generator().manual_seed(cfg.seed * 1_000_003 + r * 101 + k)
+                ss = step_seed(cfg.seed, r, k)
+                gen = torch.Generator().manual_seed(ss)
                 d, steps = local_train(model, w, X[tr_t[k]], y_local[k], cw, cfg, gen,
-                                       prox=cfg.strategy == "fedprox")
+                                       prox=cfg.strategy == "fedprox",
+                                       torch_seed=ss if cfg.per_step_seed else None)
                 if cfg.attack == "sign_flip" and k in malicious:
                     d = -d
                 updates.append(d)

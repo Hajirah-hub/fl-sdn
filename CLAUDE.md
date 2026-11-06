@@ -286,3 +286,10 @@ sign flip (−update) and targeted (malicious clients relabel attack rows as Nor
   colors fixed per strategy, no titles). Never built from `results/dry`.
   Font: STIXGeneral (Times-like, bundled with matplotlib). Architecture / pipeline diagrams:
   `scripts/paper_diagrams.py` → fig0_system_architecture, fig_model_architecture, fig_pipeline.
+- Flower validation (`scripts/flower_validation.py`, WSL venv, `PYTHONPATH=src`): random protocol,
+  P4, seed 0, R = 30; built-in Flower FedAvg / FedMedian and a custom Flower strategy calling our
+  FedAdam; clients reuse `sim.local_train`; scaling + class weights via a federated QUERY round.
+  Matches the plain loop run with `RunConfig(per_step_seed=True)` (dropout re-seeded per
+  (round, client), as in Flower's per-actor processes) to max |ΔF1| ≤ 0.0012; serialized
+  messages are 1.028 × the derived params × 4 B × 2K. Outputs: `paper_tables/flower_validation.csv`,
+  `paper_figures/fig7_flower_vs_loop.png`, `results/flower_validation/`.
