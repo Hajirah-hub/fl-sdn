@@ -23,3 +23,9 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Shareable result packages
+/paper_package_*.zip
+
+# Paper PDF (copyrighted, keep local)
+/docs/paper.pdf
