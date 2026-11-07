@@ -1,4 +1,4 @@
-# CLAUDE.md — Federated aggregation study on multi-controller SDN
+# explanation.md — Federated aggregation study on multi-controller SDN
 
 Single-person implementation of Section III of `docs/paper.pdf` (methodology only).
 Primary dataset: InSDN. Other datasets (CICDDoS2019, CICIDS2017, UNSW-NB15) follow the same
